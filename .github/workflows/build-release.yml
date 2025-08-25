@@ -1,0 +1,141 @@
+name: build-release
+
+env:
+  GH_TOKEN:  ${{ secrets.GH_PAT }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-type:
+        type: choice
+        description: Stable Release, Beta Release, or Build?
+        options: 
+        - 'stable'
+        - 'beta'
+        - 'build'
+        default: 'build'
+      release-version:
+        type: string
+        description: Firmware Version (ignored for Build)
+        default: 'vX.X.X'
+        required: true
+  pull_request:
+
+    
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      sha_short: ${{ steps.commit.outputs.sha_short }}
+      ref_name: ${{ steps.commit.outputs.ref_name }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Get short sha, sanatized ref name
+      id: commit
+      run: |
+        echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+        echo "ref_name=$(echo $GITHUB_REF_NAME | sed 's/[^a-zA-Z0-9]/_/g')" >> $GITHUB_OUTPUT 
+    - name: Cache pip and platformio
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/pip
+          ~/.platformio/.cache
+        key: ${{ runner.os }}-pio
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12' 
+    - name: Install PlatformIO
+      run: pip install --upgrade platformio
+    - name: Set version var (Release)
+      run: echo "PLATFORMIO_BUILD_FLAGS=-DFW_VERSION='\"${{ inputs.release-version }}\"' -DFW_TYPE='\"${{ inputs.release-type }}\"' -DREPO_URL='\"${{ github.repository }}\"'" >> $GITHUB_ENV
+      if: inputs.release-type	== 'stable' || inputs.release-type	== 'beta'
+    - name: Set version var (PR or Build)
+      run: echo "PLATFORMIO_BUILD_FLAGS=-DFW_VERSION='\"${{ steps.commit.outputs.ref_name }}-${{ steps.commit.outputs.sha_short }}\"' -DFW_TYPE='\"build\"' -DREPO_URL='\"${{ github.repository }}\"'" >> $GITHUB_ENV
+      if: inputs.release-type	!= 'stable' && inputs.release-type	!= 'beta'
+    - name: Setup git for private libraries
+      run: gh auth setup-git 
+    - name: Run PlatformIO
+      run: pio run
+    - name: Rename firmware (Release)
+      run: |
+        find ".pio/build/" -type f -iname 'firmware.bin' -exec sh -c '
+          path="${1%/*}";
+          cp -nv "${1}" "./${path##*/}-${{ inputs.release-version }}.bin" ' sh_cp {} \;
+        find ".pio/build/" -type f -iname 'bootloader.bin' -exec sh -c '
+          path="${1%/*}";
+          cp -nv "${1}" "./${path##*/}-${{ inputs.release-version }}-bootloader.bin" ' sh_cp {} \;
+        find ".pio/build/" -type f -iname 'partitions.bin' -exec sh -c '
+          path="${1%/*}";
+          cp -nv "${1}" "./${path##*/}-${{ inputs.release-version }}-partitions.bin" ' sh_cp {} \;
+      if: inputs.release-type	== 'stable' || inputs.release-type	== 'beta'
+    - name: Rename firmware (PR or Build)
+      run: |
+        find ".pio/build/" -type f -iname 'firmware.bin' -exec sh -c '
+          path="${1%/*}";
+          cp -nv "${1}" "./${path##*/}_${{ steps.commit.outputs.ref_name }}-${{ steps.commit.outputs.sha_short }}.bin" ' sh_cp {} \;
+        find ".pio/build/" -type f -iname 'bootloader.bin' -exec sh -c '
+          path="${1%/*}";
+          cp -nv "${1}" "./${path##*/}_${{ steps.commit.outputs.ref_name }}-${{ steps.commit.outputs.sha_short }}-bootloader.bin" ' sh_cp {} \;
+        find ".pio/build/" -type f -iname 'partitions.bin' -exec sh -c '
+          path="${1%/*}";
+          cp -nv "${1}" "./${path##*/}_${{ steps.commit.outputs.ref_name }}-${{ steps.commit.outputs.sha_short }}-partitions.bin" ' sh_cp {} \;
+      if: inputs.release-type	!= 'stable' && inputs.release-type	!= 'beta'
+    - name: Cache Build
+      uses: actions/cache@v4
+      with:
+        path: '*.bin'
+        key: ${{ runner.os }}-${{ github.run_id }}
+
+  archive:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Get Cached Build
+      uses: actions/cache@v4
+      with:
+        path: '*.bin'
+        key: ${{ runner.os }}-${{ github.run_id	 }}
+    - name: Archive Build
+      uses: actions/upload-artifact@v4
+      with:
+        name: 'build_${{ needs.build.outputs.ref_name }}-${{ needs.build.outputs.sha_short }}'
+        path: '*.bin'
+        
+  release:
+    needs:
+      - build
+    if: (inputs.release-type == 'stable' || inputs.release-type == 'beta')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Get Cached Build
+      uses: actions/cache@v4
+      with:
+        path: '*.bin'
+        key: ${{ runner.os }}-${{ github.run_id	 }}
+    - name: Development Release
+      uses: ncipollo/release-action@v1
+      if: inputs.release-type == 'beta'
+      with:
+        artifacts: '*.bin'
+        generateReleaseNotes: true
+        tag: ${{ inputs.release-version }}
+        token: ${{ secrets.GITHUB_TOKEN }}
+        prerelease: true
+        makeLatest: false
+    - name: Production Release
+      uses: ncipollo/release-action@v1
+      if: inputs.release-type == 'stable'
+      with:
+        artifacts: '*.bin'
+        generateReleaseNotes: true
+        tag: ${{ inputs.release-version }}
+        token: ${{ secrets.GITHUB_TOKEN }}
