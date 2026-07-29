@@ -2,7 +2,7 @@
  * @file companion-surface.cpp
  * @brief Implementation of satellite surface functionality for Companion API
  * @author Elliot Matson
- * @version 1.0
+ * @version 0.0.1
  * @date November 2025
  *
  * This file implements the satellite surface class that provides virtual

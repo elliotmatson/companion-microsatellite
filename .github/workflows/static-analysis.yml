@@ -29,7 +29,9 @@ jobs:
       - name: Setup git for private libraries
         run: gh auth setup-git
       - name: Run PlatformIO
-        run: pio check
+        # examples/basic is a plain Arduino IDE sketch (no platformio.ini);
+        # examples/pio-exhaustive is the PlatformIO project, so it's what pio check analyzes.
+        run: pio check -d examples/pio-exhaustive
         
   lint:
     runs-on: ubuntu-latest

@@ -1,0 +1,112 @@
+name: build-examples
+
+env:
+  GH_TOKEN: ${{ secrets.GH_PAT }}
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  # examples/pio-exhaustive is a PlatformIO project (its own platformio.ini).
+  build-platformio:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        chip: [esp32, esp32s2, esp32s3, esp32c3, esp32c6]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cache pip and platformio
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio-exhaustive-${{ matrix.chip }}
+          restore-keys: |
+            ${{ runner.os }}-pio-exhaustive-
+            ${{ runner.os }}-pio-
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+      - name: Setup git for private libraries
+        run: gh auth setup-git
+      - name: Build pio-exhaustive for ${{ matrix.chip }}
+        run: pio run -e ${{ matrix.chip }} -d examples/pio-exhaustive
+
+  # Plain Arduino IDE sketches (no platformio.ini), compiled with arduino-cli
+  # against the official arduino-esp32 core instead of PlatformIO. These are
+  # all generic WiFi-only demos, so each builds unmodified across every variant.
+  build-arduino:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [basic, subscriptions, configuration-and-variables, pincode]
+        fqbn: [esp32, esp32s2, esp32s3, esp32c3, esp32c6]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cache arduino-cli data
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: ${{ runner.os }}-arduino-cli-${{ matrix.fqbn }}
+          restore-keys: |
+            ${{ runner.os }}-arduino-cli-
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+      - name: Install ESP32 board package
+        run: |
+          arduino-cli config init --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json --overwrite
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+      - name: Install library dependencies
+        run: |
+          arduino-cli lib install ArduinoJson "Adafruit NeoPixel"
+          arduino-cli config set library.enable_unsafe_install true
+          arduino-cli lib install --git-url https://github.com/ESP32Async/AsyncTCP.git
+          arduino-cli lib install --git-url https://github.com/ESP32Async/ESPAsyncWebServer.git
+      - name: Compile ${{ matrix.example }} for esp32:esp32:${{ matrix.fqbn }}
+        run: arduino-cli compile --fqbn esp32:esp32:${{ matrix.fqbn }} --library . examples/${{ matrix.example }}
+
+  # examples/cyd targets one specific board (the classic ESP32-based "Cheap
+  # Yellow Display", ESP32-2432S028R) and needs extra display/touch
+  # libraries, so it isn't part of the generic build-arduino matrix above.
+  build-arduino-cyd:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cache arduino-cli data
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: ${{ runner.os }}-arduino-cli-cyd
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+      - name: Install ESP32 board package
+        run: |
+          arduino-cli config init --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json --overwrite
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+      - name: Install library dependencies
+        run: |
+          arduino-cli lib install ArduinoJson TFT_eSPI XPT2046_Touchscreen
+          arduino-cli config set library.enable_unsafe_install true
+          arduino-cli lib install --git-url https://github.com/ESP32Async/AsyncTCP.git
+          arduino-cli lib install --git-url https://github.com/ESP32Async/ESPAsyncWebServer.git
+      - name: Compile cyd for esp32:esp32:esp32
+        run: arduino-cli compile --fqbn esp32:esp32:esp32 --library . examples/cyd

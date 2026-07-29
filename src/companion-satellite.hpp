@@ -2,7 +2,7 @@
  * @file companion-satellite.hpp
  * @brief Companion Satellite API library for ESP32 microcontrollers
  * @author Elliot Matson
- * @version 1.0
+ * @version 0.0.1
  * @date November 2025
  *
  * This library provides functionality to connect ESP32-based devices to Bitfocus Companion
@@ -509,6 +509,17 @@ private:
      * @param requestedFormat Requested bitmap format (rgb/png/webp)
      */
     void appendBitmapFormatParam(String &command, const char *commandName, const String &requestedFormat) const;
+
+    /**
+     * @brief Log a warning if a requested square bitmap size likely won't fit in MAX_RX_BUFFER_SIZE
+     *
+     * Shared by ADD-DEVICE and ADD-SUB. This is advisory only - it doesn't stop the
+     * request from being sent, since the actual limit depends on how MAX_RX_BUFFER_SIZE
+     * is configured.
+     * @param commandName Command name used in the log message (eg. "ADD-DEVICE")
+     * @param bitmapSize Requested square bitmap size in pixels
+     */
+    void warnIfBitmapSizeTooLarge(const char *commandName, uint16_t bitmapSize) const;
 
     /**
      * @brief Check negotiated ApiVersion against a minimum version

@@ -1,0 +1,91 @@
+#######################################
+# Syntax Coloring Map for CompanionSatellite
+#######################################
+
+#######################################
+# Classes and Datatypes (KEYWORD1)
+#######################################
+
+Satellite	KEYWORD1
+SatelliteSurface	KEYWORD1
+SubscriptionState	KEYWORD1
+SatelliteSurfaceKeyType	KEYWORD1
+SatelliteAction	KEYWORD1
+SatellitePageDirection	KEYWORD1
+color	KEYWORD1
+SatelliteSurfacePincodeSupport	KEYWORD1
+SatelliteSurfaceVariableType	KEYWORD1
+SatelliteSurfaceConfig	KEYWORD1
+SatelliteSurfaceVariable	KEYWORD1
+SatelliteSurfaceKeyState	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+begin	KEYWORD2
+getDeviceName	KEYWORD2
+getHostname	KEYWORD2
+getTargetHostname	KEYWORD2
+getTargetPort	KEYWORD2
+setTargetHostname	KEYWORD2
+setTargetPort	KEYWORD2
+getCompanionVersion	KEYWORD2
+getSatelliteApiVersion	KEYWORD2
+isConnected	KEYWORD2
+isReady	KEYWORD2
+supportsSubscriptions	KEYWORD2
+supportsNonsquareButtons	KEYWORD2
+getCapsBitmapFormats	KEYWORD2
+addSubscription	KEYWORD2
+removeSubscription	KEYWORD2
+subscriptionAction	KEYWORD2
+setOnSubscriptionState	KEYWORD2
+handleMessage	KEYWORD2
+getID	KEYWORD2
+getName	KEYWORD2
+getConfig	KEYWORD2
+getVariables	KEYWORD2
+buttonAction	KEYWORD2
+setVariable	KEYWORD2
+pressPincodeKey	KEYWORD2
+reportFirmwareUpdateInfo	KEYWORD2
+changePage	KEYWORD2
+setOnKeyStateChange	KEYWORD2
+setOnKeysClear	KEYWORD2
+setOnBrightnessSet	KEYWORD2
+setOnVariableSet	KEYWORD2
+setOnLockedStateSet	KEYWORD2
+setOnDeviceConfig	KEYWORD2
+parseSatelliteKeyType	KEYWORD2
+parseSatelliteColor	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
+DEFAULT_INSTANCE_NAME	LITERAL1
+DEFAULT_HOSTNAME	LITERAL1
+DEFAULT_PORT	LITERAL1
+SATELLITE_EVENTS	LITERAL1
+SATELLITE_SURFACE_EVENTS	LITERAL1
+SATELLITE_EVENT_READY	LITERAL1
+SATELLITE_EVENT_CONNECTED	LITERAL1
+SATELLITE_EVENT_PING_SENT	LITERAL1
+SATELLITE_EVENT_PONG_RECEIVED	LITERAL1
+SATELLITE_EVENT_DISCONNECTED	LITERAL1
+BUTTON	LITERAL1
+PAGEUP	LITERAL1
+PAGEDOWN	LITERAL1
+PAGENUM	LITERAL1
+PRESSED	LITERAL1
+RELEASED	LITERAL1
+RIGHT	LITERAL1
+LEFT	LITERAL1
+NEXT	LITERAL1
+PREVIOUS	LITERAL1
+NONE	LITERAL1
+PARTIAL	LITERAL1
+FULL	LITERAL1
+VARIABLE_INPUT	LITERAL1
+VARIABLE_OUTPUT	LITERAL1

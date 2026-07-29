@@ -1,0 +1,33 @@
+{
+  "name": "CompanionSatellite",
+  "version": "0.0.1",
+  "description": "Connect ESP32 microcontrollers to Bitfocus Companion via the Companion Satellite API. Provides virtual button surfaces with bitmaps/colors/text, rotary encoders, pincode input, standalone button subscriptions, and variables.",
+  "keywords": [
+    "bitfocus",
+    "companion",
+    "satellite",
+    "streamdeck",
+    "esp32",
+    "controller"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/elliotmatson/companion-microsatellite"
+  },
+  "authors": [
+    {
+      "name": "Elliot Matson",
+      "url": "https://github.com/elliotmatson",
+      "maintainer": true
+    }
+  ],
+  "license": "MIT",
+  "frameworks": ["arduino", "espidf"],
+  "platforms": ["espressif32"],
+  "headers": ["companion-satellite.hpp", "companion-surface.hpp"],
+  "dependencies": {
+    "ESP32Async/ESPAsyncWebServer": "^3.12.0",
+    "ESP32Async/AsyncTCP": "^3.5.0",
+    "bblanchon/ArduinoJson": "^7.4.3"
+  }
+}

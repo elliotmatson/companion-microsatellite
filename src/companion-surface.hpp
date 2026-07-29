@@ -2,7 +2,7 @@
  * @file companion-surface.hpp
  * @brief Satellite surface implementation for Companion Satellite API
  * @author Elliot Matson
- * @version 1.0
+ * @version 0.0.1
  * @date November 2025
  *
  * This file contains the satellite surface implementation that handles
@@ -97,7 +97,6 @@ struct SatelliteSurfaceConfig
 {
     uint8_t totalKeys = 32;                                                               /**< Total number of keys on the surface */
     uint8_t keysPerRow = 8;                                                               /**< Number of keys per row */
-    bool sendBitmaps = false;                                                             /**< Whether to send bitmap images */
     bool sendColors = true;                                                               /**< Whether to send color information */
     bool sendText = true;                                                                 /**< Whether to send text labels */
     bool sendTextStyle = false;                                                           /**< Whether to send text styling */
@@ -116,8 +115,18 @@ struct SatelliteSurfaceConfig
     std::optional<String> canChangePageLabel = std::nullopt;
 
     /**
+     * Requested square bitmap size in pixels for this surface's KEY-STATE BITMAP field.
+     * Leave unset (nullopt) to disable bitmaps entirely (sends BITMAPS=false). Any set
+     * value - including 0 - is sent through as-is; per the protocol, 0 also disables
+     * bitmaps, while any positive value requests that pixel size. Larger bitmaps need a
+     * correspondingly larger MAX_RX_BUFFER_SIZE (see companion-satellite.hpp) - a warning
+     * is logged if the requested size looks like it won't fit.
+     */
+    std::optional<uint16_t> bitmapSize = std::nullopt;
+
+    /**
      * Bitmap encoding to request for this surface's KEY-STATE BITMAP field (rgb/png/webp).
-     * Only used when sendBitmaps is true. Falls back to rgb if unset, or if the requested
+     * Only used when bitmapSize is set. Falls back to rgb if unset, or if the requested
      * format was not advertised by the server's CAPS BITMAP_FORMATS list.
      */
     std::optional<String> bitmapFormat = std::nullopt;

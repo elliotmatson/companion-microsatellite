@@ -2,7 +2,7 @@
  * @file companion-satellite.cpp
  * @brief Implementation of the Companion Satellite API library
  * @author Elliot Matson
- * @version 1.0
+ * @version 0.0.1
  * @date November 2025
  */
 
@@ -563,6 +563,10 @@ void Satellite::addSubscription(const String &subId, const String &location, std
         // Per the API, 0 explicitly means "do not stream bitmaps" - any other
         // value is the requested square pixel size, passed through as-is.
         command += " BITMAP=" + String(bitmapSize.value());
+        if (bitmapSize.value() > 0)
+        {
+            warnIfBitmapSizeTooLarge("ADD-SUB", bitmapSize.value());
+        }
     }
 
     if (bitmapFormat.has_value())
@@ -941,15 +945,20 @@ void Satellite::sendAddCommand(SatelliteSurface &surface)
                        " PRODUCT_NAME=\"" + surface.getName() +
                        "\" KEYS_TOTAL=" + String(config.totalKeys) +
                        " KEYS_PER_ROW=" + String(config.keysPerRow) +
-                       " BITMAPS=" + (config.sendBitmaps ? "true" : "false") +
+                       " BITMAPS=" + (config.bitmapSize.has_value() ? String(config.bitmapSize.value()) : String("false")) +
                        " COLORS=" + (config.sendColors ? "true" : "false") +
                        " TEXT=" + (config.sendText ? "true" : "false") +
                        " TEXT_STYLE=" + String(config.sendTextStyle ? "true" : "false") +
                        " BRIGHTNESS=" + String(config.supportsBrightness ? "true" : "false");
 
-    if (config.sendBitmaps && config.bitmapFormat.has_value())
+    if (config.bitmapSize.has_value())
     {
-        appendBitmapFormatParam(addDeviceCommand, "ADD-DEVICE", config.bitmapFormat.value());
+        warnIfBitmapSizeTooLarge("ADD-DEVICE", config.bitmapSize.value());
+
+        if (config.bitmapFormat.has_value())
+        {
+            appendBitmapFormatParam(addDeviceCommand, "ADD-DEVICE", config.bitmapFormat.value());
+        }
     }
 
     // CAN_CHANGE_PAGE is a label string for the checkbox Companion shows in the
@@ -1104,6 +1113,31 @@ void Satellite::appendBitmapFormatParam(String &command, const char *commandName
     }
 
     command += " BITMAP_FORMAT=\"" + requestedFormat + "\"";
+}
+
+/**
+ * @brief Log a warning if a requested square bitmap size likely won't fit in MAX_RX_BUFFER_SIZE
+ *
+ * Shared by ADD-DEVICE (sendAddCommand) and ADD-SUB (addSubscription). Advisory
+ * only - it doesn't stop the request from being sent.
+ */
+void Satellite::warnIfBitmapSizeTooLarge(const char *commandName, uint16_t bitmapSize) const
+{
+    if (bitmapSize == 0)
+    {
+        return;
+    }
+
+    // Raw 8-bit RGB is 3 bytes/pixel; base64 encoding inflates that to ceil(raw/3)*4 bytes.
+    size_t rawBytes = static_cast<size_t>(bitmapSize) * bitmapSize * 3;
+    size_t base64Bytes = ((rawBytes + 2) / 3) * 4;
+    constexpr size_t kOverheadBytes = 256; // room for the surrounding KEY-STATE/SUB-STATE fields
+
+    if (base64Bytes + kOverheadBytes > MAX_RX_BUFFER_SIZE)
+    {
+        ESP_LOGW("Satellite", "%s bitmap size %u needs ~%u bytes but MAX_RX_BUFFER_SIZE is %u - increase MAX_RX_BUFFER_SIZE in companion-satellite.hpp or the bitmap will be dropped",
+                 commandName, bitmapSize, static_cast<unsigned>(base64Bytes + kOverheadBytes), static_cast<unsigned>(MAX_RX_BUFFER_SIZE));
+    }
 }
 
 /**
