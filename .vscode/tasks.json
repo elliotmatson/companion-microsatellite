@@ -1,0 +1,27 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run PlatformIO Unit Tests",
+			"type": "shell",
+			"command": "platformio",
+			"args": [
+				"test",
+				"-e",
+				"esp32s2"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Run PlatformIO Unit Tests",
+			"type": "shell",
+			"command": "platformio",
+			"args": [
+				"test",
+				"-e",
+				"esp32s2"
+			],
+			"isBackground": false
+		}
+	]
+}
