@@ -25,7 +25,9 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install PlatformIO
-        run: pip install --upgrade platformio
+        # 6.2.0 bundles SCons 4.11, which dropped SCons.Tool.FortranCommon that the
+        # pinned pioarduino platform still imports - stay on 6.1.x (SCons 4.8)
+        run: pip install "platformio==6.1.19"
       - name: Setup git for private libraries
         # Only needed when GH_PAT is configured for private dependencies; without
         # it, gh fails with "not logged in" and every dependency here is public.
