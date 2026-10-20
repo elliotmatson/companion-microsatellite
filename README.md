@@ -99,6 +99,75 @@ Key state for a layout surface carries `state.controlId`, and `state.index` is t
 
 A raw rgb bitmap of W×H pixels arrives as a single ~W×H×4 byte line, which must fit in `SatelliteOptions::maxLineLength` (32KB by default - enough for 80×80). Larger lines are skipped with a warning rather than dropping the connection. For big keys, ask for `bitmapFormat = "png"` or `"webp"` (if you have a decoder), or a smaller size.
 
+## Migrating from 0.0.1
+
+0.1.0 changes some of the API. Most sketches only need the first two changes.
+
+**Call `satellite.loop()`.** Callbacks used to run on the AsyncTCP network task as messages arrived. They now run inside `satellite.loop()`, so call it from your `loop()`. A sketch that never calls it still connects and registers, but its callbacks never run (a warning is logged once updates have waited 5 seconds). To keep the old behaviour, pass `SatelliteDispatchMode::IMMEDIATE`:
+
+```cpp
+// 0.0.1
+void loop() {
+    // ...
+}
+
+// 0.1.0
+void loop() {
+    satellite.loop();
+    // ...
+}
+
+// or, to run callbacks on the network task as before
+SatelliteOptions options;
+options.dispatch = SatelliteDispatchMode::IMMEDIATE;
+satellite.begin(options);
+```
+
+**Decode bitmaps inside the key state callback.** `state.bitmap` used to be a `String` holding base64. It is now a `SatelliteEncodedData` that points into the received message, valid only until the callback returns. Decode it there with `decode()`, which handles the base64 and the `data:` url of png/webp bitmaps:
+
+```cpp
+// 0.0.1
+if (state.bitmap) {
+    decodeAndDraw(state.bitmap.value()); // a base64 String
+}
+
+// 0.1.0
+if (state.bitmap && !state.bitmap->isDataUrl()) {
+    size_t length = state.bitmap->decode(buffer, sizeof(buffer)); // raw rgb bytes
+}
+```
+
+**Subscriptions are objects.** `addSubscription()`, `removeSubscription()`, `subscriptionAction()` and `setOnSubscriptionState()` are replaced by `SatelliteSubscription`, which is re-registered after every reconnect and removed when destroyed. Its id is assigned for you (`getID()`):
+
+```cpp
+// 0.0.1
+satellite.addSubscription("sub-1", "1/0/0", 72, String("rgb"), true, true, false);
+satellite.setOnSubscriptionState([](const Satellite::SubscriptionState &state) { /* ... */ });
+satellite.subscriptionAction("sub-1", SatelliteAction::PRESSED);
+
+// 0.1.0
+SatelliteSubscriptionConfig config = {.bitmapSize = 72, .bitmapFormat = "rgb"};
+SatelliteSubscription subscription(satellite, "1/0/0", config);
+subscription.setOnStateChange([](const SatelliteControlState &state) { /* ... */ });
+subscription.action(SatelliteAction::PRESSED);
+```
+
+Everything else, in order of how likely it is to affect you:
+
+| 0.0.1                                                                                   | 0.1.0                                                                                                                                          |
+| --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `setOnLockedStateSet([](bool locked, uint8_t characters) {...})`                        | `setOnLockedStateSet([](const SatelliteLockedState &state) {...})`, with `locked`, `characterCount` and the new `rotation`                     |
+| `esp_event` events on `SATELLITE_EVENTS` (`SATELLITE_EVENT_*`)                          | `satellite.setOnConnectionStateChange(...)` with a `SatelliteConnectionState`                                                                  |
+| `isReady()` true once `BEGIN` is validated                                              | `isReady()` true once `CAPS` has also arrived, so `supportsSubscriptions()` and friends are accurate as soon as it is                          |
+| Key presses and variables sent before Companion accepts a surface                       | Dropped until it does: check `surface.isRegistered()`, or use `setOnRegistered()` to send anything that needs to go out after each (re)connect |
+| `MAX_RX_BUFFER_SIZE`, edited in the header                                              | `SatelliteOptions::maxLineLength`                                                                                                              |
+| `DEFAULT_INSTANCE_NAME`, `DEFAULT_HOSTNAME`, `DEFAULT_PORT`                             | `Satellite::kDefaultDeviceName`, `Satellite::kDefaultHostname`, `Satellite::kDefaultApiPort`                                                   |
+| `color`                                                                                 | `SatelliteColor` (`color` still works, but is deprecated)                                                                                      |
+| `uint8_t` key indexes, `totalKeys` and `keysPerRow`                                     | `uint16_t`                                                                                                                                     |
+| `parseSatelliteKeyType()`, `parseSatelliteColor()`, `SatelliteSurface::handleMessage()` | Removed (internal). The library parses messages, and `satellite_protocol::parseColor()` is there if you need it                                |
+
+Callbacks declared with the old parameter types still compile: a key state lambda taking `const SatelliteSurfaceKeyState &` (now an alias of `SatelliteControlState`), and a variable lambda taking `String id, String value` by value.
+
 ## Examples
 
 Arduino IDE sketches (`.ino`, no `platformio.ini`) - open directly in the Arduino IDE, or compile with `arduino-cli`:
