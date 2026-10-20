@@ -50,7 +50,6 @@
 
 #include <XPT2046_Touchscreen.h>
 #include <WiFi.h>
-#include "mbedtls/base64.h"
 #include "companion-satellite.hpp"
 
 // WiFi configuration - replace with your own network before flashing, and
@@ -86,8 +85,9 @@ constexpr int16_t kCellHeight = kScreenHeight / kGridRows;
 
 // Requested square bitmap size, matching the cell size exactly so each
 // button image fills its cell. Sent as raw 8-bit RGB, 3 bytes per pixel,
-// base64-encoded - kCellWidth/kCellHeight are both 80px here, comfortably
-// under the library's default MAX_RX_BUFFER_SIZE.
+// base64-encoded - kCellWidth/kCellHeight are both 80px here, so each
+// KEY-STATE line is ~26KB, under the default SatelliteOptions::maxLineLength
+// (32KB).
 constexpr uint16_t kBitmapSize = 80;
 
 TFT_eSPI tft = TFT_eSPI();
@@ -128,32 +128,41 @@ void drawCellColor(uint8_t index, uint16_t fillColor)
   tft.drawRect(x, y, w, h, TFT_DARKGREY);
 }
 
-// Decode a base64 raw-RGB bitmap from Companion and blit it into a key's cell.
-void drawCellBitmap(uint8_t index, const String &base64Data)
+// Decode a raw-RGB bitmap from Companion and blit it into a key's cell.
+// The bitmap data is only valid during the key state callback, so this is
+// called from inside it (which runs in satellite.loop(), on the loop task -
+// the same task that reads the touchscreen, so the two never share SPI
+// concurrently).
+void drawCellBitmap(uint8_t index, const SatelliteEncodedData &bitmap)
 {
-  size_t rawLen = 0;
-  int sizeResult = mbedtls_base64_decode(nullptr, 0, &rawLen, (const unsigned char *)base64Data.c_str(), base64Data.length());
-  if ((sizeResult != 0 && sizeResult != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL) || rawLen != (size_t)kBitmapSize * kBitmapSize * 3)
+  constexpr size_t kRawLength = (size_t)kBitmapSize * kBitmapSize * 3;
+  if (bitmap.isDataUrl() || bitmap.decodedLength() != kRawLength)
   {
     // Not the raw RGB size we expect (eg. a png/webp data URL) - skip it.
     return;
   }
 
-  uint8_t *rgb888 = new uint8_t[rawLen];
-  size_t decodedLen = 0;
-  int decodeResult = mbedtls_base64_decode(rgb888, rawLen, &decodedLen, (const unsigned char *)base64Data.c_str(), base64Data.length());
-  if (decodeResult != 0)
+  // Decode and convert in one buffer: each 3-byte RGB888 pixel shrinks to a
+  // 2-byte RGB565 one, so converting front to back never overwrites input
+  // that hasn't been read yet. One allocation instead of two.
+  constexpr size_t kPixels = (size_t)kBitmapSize * kBitmapSize;
+  uint16_t *rgb565 = new (std::nothrow) uint16_t[(kRawLength + 1) / 2];
+  if (!rgb565)
   {
-    delete[] rgb888;
+    return;
+  }
+  uint8_t *rgb888 = reinterpret_cast<uint8_t *>(rgb565);
+  if (bitmap.decode(rgb888, kRawLength) != kRawLength)
+  {
+    delete[] rgb565;
     return;
   }
 
-  uint16_t *rgb565 = new uint16_t[kBitmapSize * kBitmapSize];
-  for (uint16_t i = 0; i < kBitmapSize * kBitmapSize; i++)
+  for (size_t i = 0; i < kPixels; i++)
   {
-    rgb565[i] = tft.color565(rgb888[i * 3], rgb888[i * 3 + 1], rgb888[i * 3 + 2]);
+    uint8_t r = rgb888[i * 3], g = rgb888[i * 3 + 1], b = rgb888[i * 3 + 2];
+    rgb565[i] = tft.color565(r, g, b);
   }
-  delete[] rgb888;
 
   int16_t x, y, w, h;
   cellRect(index, x, y, w, h);
@@ -219,7 +228,7 @@ void setup()
 
                                 if (state.bitmap.has_value())
                                 {
-                                  drawCellBitmap(state.index, state.bitmap.value());
+                                  drawCellBitmap(state.index, *state.bitmap);
                                 }
                                 else
                                 {
@@ -239,6 +248,9 @@ void setup()
 
 void loop()
 {
+  // Draws any key updates received since last time (see drawCellBitmap).
+  satellite.loop();
+
   if (touchscreen.touched())
   {
     TS_Point point = touchscreen.getPoint();

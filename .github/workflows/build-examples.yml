@@ -11,6 +11,16 @@ on:
       - main
 
 jobs:
+  # Host-side tests (test/host): the protocol codec against Companion's conformance
+  # corpus, and the Satellite classes against mocked Arduino/AsyncTCP, under ASan/UBSan.
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build and run host tests
+        run: make -C test/host
+
   # examples/pio-exhaustive is a PlatformIO project (its own platformio.ini).
   build-platformio:
     runs-on: ubuntu-latest
@@ -50,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [basic, subscriptions, configuration-and-variables, pincode]
+        example: [basic, subscriptions, configuration-and-variables, pincode, encoder-led-ring]
         fqbn: [esp32, esp32s2, esp32s3, esp32c3, esp32c6]
     steps:
       - name: Checkout

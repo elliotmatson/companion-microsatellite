@@ -62,8 +62,6 @@ void setup()
   }
   Serial.println("Connected to WiFi");
 
-  satellite.begin();
-
   // While locked, Companion won't send meaningful KEY-STATE updates.
   surface.setOnKeyStateChange([](const SatelliteSurfaceKeyState &state)
                               {
@@ -76,24 +74,32 @@ void setup()
 
   // Companion -> device: reports when a pincode-protected page is
   // locked/unlocked, and how many digits have been entered so far.
-  surface.setOnLockedStateSet([](bool isLocked, uint8_t charactersEntered)
+  // rotation is the surface rotation configured in Companion, so a display
+  // can draw the lock screen the right way up.
+  surface.setOnLockedStateSet([](const SatelliteLockedState &state)
                               {
-                                locked = isLocked;
-                                Serial.printf("onLockedStateSet: locked=%d charactersEntered=%u\n", isLocked, charactersEntered);
+                                locked = state.locked;
+                                Serial.printf("onLockedStateSet: locked=%d charactersEntered=%u rotation=%d\n",
+                                              state.locked, state.characterCount, state.rotation);
                               });
 
-  // Demonstrate entering a pincode, one digit at a time.
-  delay(500);
-  const uint8_t digits[] = {1, 2, 3, 4};
-  for (uint8_t digit : digits)
-  {
-    surface.pressPincodeKey(digit);
-    Serial.printf("pressPincodeKey(%u)\n", digit);
-    delay(300);
-  }
+  satellite.begin();
 }
 
 void loop()
 {
-  delay(1000);
+  satellite.loop();
+
+  // Demonstrate entering a pincode, one digit per second, while locked.
+  static unsigned long lastDigitMs = 0;
+  static uint8_t nextDigit = 1;
+  if (locked && millis() - lastDigitMs >= 1000)
+  {
+    lastDigitMs = millis();
+    surface.pressPincodeKey(nextDigit);
+    Serial.printf("pressPincodeKey(%u)\n", nextDigit);
+    nextDigit = nextDigit % 4 + 1;
+  }
+
+  delay(10);
 }

@@ -1,7 +1,7 @@
 {
   "name": "CompanionSatellite",
-  "version": "0.0.1",
-  "description": "Connect ESP32 microcontrollers to Bitfocus Companion via the Companion Satellite API. Provides virtual button surfaces with bitmaps/colors/text, rotary encoders, pincode input, standalone button subscriptions, and variables.",
+  "version": "0.1.0",
+  "description": "Connect ESP32 microcontrollers to Bitfocus Companion via the Companion Satellite API. Virtual surfaces with bitmaps/colors/text, layout manifests with per-control styles and LED rings, rotary encoders with step counts, pincode input, button subscriptions, and variables.",
   "keywords": [
     "bitfocus",
     "companion",
@@ -22,12 +22,29 @@
     }
   ],
   "license": "MIT",
-  "frameworks": ["arduino", "espidf"],
-  "platforms": ["espressif32"],
-  "headers": ["companion-satellite.hpp", "companion-surface.hpp"],
+  "frameworks": [
+    "arduino",
+    "espidf"
+  ],
+  "platforms": [
+    "espressif32"
+  ],
+  "headers": [
+    "companion-satellite.hpp",
+    "companion-surface.hpp",
+    "companion-subscription.hpp",
+    "companion-satellite-types.hpp",
+    "satellite-protocol.hpp"
+  ],
   "dependencies": {
     "ESP32Async/ESPAsyncWebServer": "^3.12.0",
     "ESP32Async/AsyncTCP": "^3.5.0",
     "bblanchon/ArduinoJson": "^7.4.3"
+  },
+  "export": {
+    "exclude": [
+      "test",
+      ".github"
+    ]
   }
 }

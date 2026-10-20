@@ -8,3 +8,4 @@ managed_components
 sdkconfig.*.old
 sdkconfig.esp32*
 dependencies.lock
+test/host/build
