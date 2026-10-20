@@ -14,7 +14,11 @@ public:
         return values;
     }
 
-    bool begin(const char *name, bool) { _ns = std::string(name) + "/"; return true; }
+    bool begin(const char *name, bool)
+    {
+        _ns = std::string(name) + "/";
+        return true;
+    }
     String getString(const char *key, const String &fallback)
     {
         auto it = store().find(_ns + key);

@@ -148,7 +148,8 @@ void satelliteParseControlState(const satellite_protocol::Params &params, Satell
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-Satellite::Satellite(const char *deviceName, uint16_t apiPort) : _apiPort(apiPort)
+Satellite::Satellite(const char *deviceName, uint16_t apiPort)
+    : _apiPort(apiPort)
 {
     char chipId[18];
     snprintf(chipId, sizeof(chipId), "%llx", ESP.getEfuseMac());
@@ -368,6 +369,38 @@ bool Satellite::isBitmapFormatAdvertised(const String &format) const
         return false;
     }
     return std::find(_capsBitmapFormats.begin(), _capsBitmapFormats.end(), format) != _capsBitmapFormats.end();
+}
+
+void Satellite::appendBitmapFormat(satellite_protocol::MessageBuilder &command, const std::optional<String> &format) const
+{
+    if (!format || format->length() == 0)
+    {
+        return;
+    }
+    if (isBitmapFormatAdvertised(*format))
+    {
+        command.str("BITMAP_FORMAT", format->c_str());
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Bitmap format '%s' not supported by this Companion, using rgb", format->c_str());
+    }
+}
+
+std::vector<int> Satellite::rotationDirections(int steps) const
+{
+    /** Upper bound Companion applies to a single rotation's step count */
+    constexpr int kMaxRotationSteps = 100;
+
+    std::vector<int> directions;
+    bool amounts = supportsRotaryAmount();
+    while (steps != 0)
+    {
+        int chunk = amounts ? std::max(-kMaxRotationSteps, std::min(kMaxRotationSteps, steps)) : (steps > 0 ? 1 : -1);
+        directions.push_back(chunk);
+        steps -= chunk;
+    }
+    return directions;
 }
 
 // ---------------------------------------------------------------------------

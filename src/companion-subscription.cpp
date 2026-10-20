@@ -11,9 +11,6 @@ using satellite_protocol::MessageBuilder;
 
 [[maybe_unused]] static const char *TAG = "SatelliteSubscription";
 
-/** Upper bound Companion applies to a single rotation's step count */
-static constexpr int kMaxRotationSteps = 100;
-
 static bool isValidLocation(const String &location)
 {
     // page/row/column, each a non-negative integer
@@ -95,17 +92,7 @@ std::string SatelliteSubscription::buildAddCommand() const
     if (_config.bitmapSize)
     {
         command.num("BITMAP", *_config.bitmapSize);
-        if (_config.bitmapFormat && _config.bitmapFormat->length() > 0)
-        {
-            if (_satellite->isBitmapFormatAdvertised(*_config.bitmapFormat))
-            {
-                command.str("BITMAP_FORMAT", _config.bitmapFormat->c_str());
-            }
-            else
-            {
-                ESP_LOGW(TAG, "Bitmap format '%s' not supported by this Companion, using rgb", _config.bitmapFormat->c_str());
-            }
-        }
+        _satellite->appendBitmapFormat(command, _config.bitmapFormat);
     }
     command.boolean("COLORS", _config.colors).boolean("TEXT", _config.text).boolean("TEXT_STYLE", _config.textStyle);
 
@@ -181,11 +168,8 @@ void SatelliteSubscription::rotate(int steps)
         return;
     }
 
-    bool amounts = _satellite->supportsRotaryAmount();
-    while (steps != 0)
+    for (int direction : _satellite->rotationDirections(steps))
     {
-        int chunk = amounts ? std::max(-kMaxRotationSteps, std::min(kMaxRotationSteps, steps)) : (steps > 0 ? 1 : -1);
-        steps -= chunk;
-        _satellite->send(MessageBuilder("SUB-ROTATE").str("SUBID", _subId.c_str()).num("DIRECTION", chunk).finish());
+        _satellite->send(MessageBuilder("SUB-ROTATE").str("SUBID", _subId.c_str()).num("DIRECTION", direction).finish());
     }
 }

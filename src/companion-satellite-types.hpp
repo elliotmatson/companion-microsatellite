@@ -103,7 +103,8 @@ class SatelliteEncodedData
 {
 public:
     SatelliteEncodedData() = default;
-    explicit SatelliteEncodedData(std::string_view value) : _value(value) {}
+    explicit SatelliteEncodedData(std::string_view value)
+        : _value(value) {}
 
     /** @brief The value exactly as received */
     std::string_view raw() const { return _value; }
@@ -145,17 +146,17 @@ private:
  */
 struct SatelliteControlState
 {
-    uint16_t index = 0;    /**< Key index. For a layout surface, the position of the control in the layout's controls list */
-    String controlId;      /**< CONTROLID for layout surfaces, else empty */
+    uint16_t index = 0;                                             /**< Key index. For a layout surface, the position of the control in the layout's controls list */
+    String controlId;                                               /**< CONTROLID for layout surfaces, else empty */
     SatelliteSurfaceKeyType type = SatelliteSurfaceKeyType::BUTTON; /**< Type of key */
-    std::optional<String> location;          /**< Absolute location, "page/row/column", when known */
-    std::optional<SatelliteEncodedData> bitmap; /**< Bitmap - only valid during the callback, see SatelliteEncodedData */
-    std::optional<SatelliteColor> keyColor;  /**< Background color */
-    std::optional<SatelliteColor> textColor; /**< Text color */
-    std::optional<String> text;              /**< Text label (already base64 decoded) */
-    std::optional<uint8_t> fontSize;         /**< Font size, 0 when Companion says "auto" */
-    std::optional<bool> pressed;             /**< Pressed state */
-    std::optional<SatelliteEncodedData> leds; /**< LED colors, one R,G,B triple per segment - only valid during the callback */
+    std::optional<String> location;                                 /**< Absolute location, "page/row/column", when known */
+    std::optional<SatelliteEncodedData> bitmap;                     /**< Bitmap - only valid during the callback, see SatelliteEncodedData */
+    std::optional<SatelliteColor> keyColor;                         /**< Background color */
+    std::optional<SatelliteColor> textColor;                        /**< Text color */
+    std::optional<String> text;                                     /**< Text label (already base64 decoded) */
+    std::optional<uint8_t> fontSize;                                /**< Font size, 0 when Companion says "auto" */
+    std::optional<bool> pressed;                                    /**< Pressed state */
+    std::optional<SatelliteEncodedData> leds;                       /**< LED colors, one R,G,B triple per segment - only valid during the callback */
 };
 
 /** @brief KEY-STATE uses the shared control state */
@@ -182,13 +183,13 @@ enum class SatelliteLedsMode
  */
 struct SatelliteStylePreset
 {
-    String name;                           /**< Preset name. A layout must define one named "default" */
-    uint16_t bitmapWidth = 0;              /**< Bitmap size in pixels, 0 for no bitmap */
-    uint16_t bitmapHeight = 0;             /**< Bitmap height, non-square sizes need Companion to advertise NONSQUARE */
-    bool colors = false;                   /**< Stream COLOR/TEXTCOLOR */
-    bool text = false;                     /**< Stream TEXT */
-    bool textStyle = false;                /**< Stream FONT_SIZE */
-    uint8_t ledSegments = 0;               /**< Number of addressable LEDs (1-200), 0 for none (API >= 1.13.0) */
+    String name;                                            /**< Preset name. A layout must define one named "default" */
+    uint16_t bitmapWidth = 0;                               /**< Bitmap size in pixels, 0 for no bitmap */
+    uint16_t bitmapHeight = 0;                              /**< Bitmap height, non-square sizes need Companion to advertise NONSQUARE */
+    bool colors = false;                                    /**< Stream COLOR/TEXTCOLOR */
+    bool text = false;                                      /**< Stream TEXT */
+    bool textStyle = false;                                 /**< Stream FONT_SIZE */
+    uint8_t ledSegments = 0;                                /**< Number of addressable LEDs (1-200), 0 for none (API >= 1.13.0) */
     SatelliteLedsMode ledsMode = SatelliteLedsMode::SIMPLE; /**< How the LEDs are arranged */
 };
 
@@ -197,10 +198,10 @@ struct SatelliteStylePreset
  */
 struct SatelliteLayoutControl
 {
-    String id;          /**< Unique id (letters, digits, `-` and `/`), eg. "0/3" */
+    String id;           /**< Unique id (letters, digits, `-` and `/`), eg. "0/3" */
     uint16_t row = 0;    /**< Zero-based row, used to place it in Companion's grid */
     uint16_t column = 0; /**< Zero-based column */
-    String stylePreset; /**< Name of the preset to use, or empty for "default" */
+    String stylePreset;  /**< Name of the preset to use, or empty for "default" */
 };
 
 /**

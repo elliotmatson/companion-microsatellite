@@ -7,6 +7,9 @@ on:
   workflow_dispatch:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   static-analysis:
     runs-on: ubuntu-latest
@@ -36,8 +39,9 @@ jobs:
       - name: Run PlatformIO
         # examples/basic is a plain Arduino IDE sketch (no platformio.ini);
         # examples/pio-exhaustive is the PlatformIO project, so it's what pio check analyzes.
-        run: pio check -d examples/pio-exhaustive
-        
+        # -v so a tool failure ("cppcheck failed to perform check!") shows its output
+        run: pio check -v -d examples/pio-exhaustive
+
   lint:
     runs-on: ubuntu-latest
 
@@ -60,3 +64,11 @@ jobs:
         env:
           # To report GitHub Actions status checks
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Linter configs (.clang-format, .jscpd.json...) live in .github/linters.
+          # cpplint enforces Google style, which this repo doesn't follow (clang-format
+          # checks the repo's own style instead), and textlint's terminology rules
+          # don't suit the docs.
+          VALIDATE_CPP: false
+          VALIDATE_NATURAL_LANGUAGE: false
+          # Copied verbatim from Companion, so kept byte-for-byte
+          FILTER_REGEX_EXCLUDE: test/host/satellite-protocol-corpus\.json

@@ -22,13 +22,8 @@
     }
   ],
   "license": "MIT",
-  "frameworks": [
-    "arduino",
-    "espidf"
-  ],
-  "platforms": [
-    "espressif32"
-  ],
+  "frameworks": ["arduino", "espidf"],
+  "platforms": ["espressif32"],
   "headers": [
     "companion-satellite.hpp",
     "companion-surface.hpp",
@@ -42,9 +37,6 @@
     "bblanchon/ArduinoJson": "^7.4.3"
   },
   "export": {
-    "exclude": [
-      "test",
-      ".github"
-    ]
+    "exclude": ["test", ".github"]
   }
 }

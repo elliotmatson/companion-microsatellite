@@ -20,11 +20,11 @@ class Satellite;
  */
 struct SatelliteSubscriptionConfig
 {
-    std::optional<uint16_t> bitmapSize = std::nullopt;   /**< Square bitmap size in pixels, unset for no bitmap */
-    std::optional<String> bitmapFormat = std::nullopt;   /**< rgb/png/webp, falls back to rgb if not advertised */
-    bool colors = true;                                  /**< Receive COLOR/TEXTCOLOR */
-    bool text = true;                                    /**< Receive TEXT */
-    bool textStyle = false;                              /**< Receive FONT_SIZE */
+    std::optional<uint16_t> bitmapSize = std::nullopt; /**< Square bitmap size in pixels, unset for no bitmap */
+    std::optional<String> bitmapFormat = std::nullopt; /**< rgb/png/webp, falls back to rgb if not advertised */
+    bool colors = true;                                /**< Receive COLOR/TEXTCOLOR */
+    bool text = true;                                  /**< Receive TEXT */
+    bool textStyle = false;                            /**< Receive FONT_SIZE */
 };
 
 /**

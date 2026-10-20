@@ -26,7 +26,7 @@ lib_deps =
 
 The library declares its own dependencies (ESPAsyncWebServer, AsyncTCP, ArduinoJson), so PlatformIO will pull those in automatically.
 
-**Arduino IDE:** clone or download this repository into your `Arduino/libraries/` folder (or use *Sketch > Include Library > Add .ZIP Library*), then install ESPAsyncWebServer, AsyncTCP, and ArduinoJson yourself via the Library Manager, since Arduino IDE doesn't resolve a library's own dependencies automatically the way PlatformIO does.
+**Arduino IDE:** clone or download this repository into your `Arduino/libraries/` folder (or use _Sketch > Include Library > Add .ZIP Library_), then install ESPAsyncWebServer, AsyncTCP, and ArduinoJson yourself via the Library Manager, since Arduino IDE doesn't resolve a library's own dependencies automatically the way PlatformIO does.
 
 ## Usage
 
@@ -64,7 +64,9 @@ Point the device at Companion either from Companion's own surface discovery (it 
 
 ### Threading
 
-By default (`SatelliteDispatchMode::LOOP`) every callback runs inside `satellite.loop()`, on whichever task calls it. Received updates wait in a bounded queue until then, and newer state for a key replaces older state that hasn't been delivered yet, so a slow `loop()` (eg. one drawing to a display) only ever draws the latest state. Calling methods like `buttonAction()` or `setVariable()` is safe from any task.
+By default (`SatelliteDispatchMode::LOOP`) every callback runs inside `satellite.loop()`, on whichever task calls it. Calling methods like `buttonAction()` or `setVariable()` is safe from any task.
+
+Received updates wait in a bounded queue until `loop()` runs, and newer state for a key replaces older state that hasn't been delivered yet, so a slow `loop()` (eg. one drawing to a display) only ever draws the latest state.
 
 Pass `SatelliteOptions{.dispatch = SatelliteDispatchMode::IMMEDIATE}` to `begin()` to run callbacks straight away on the network task instead - lower latency, but keep them short and thread-safe.
 

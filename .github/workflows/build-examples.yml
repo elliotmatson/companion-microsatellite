@@ -10,6 +10,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   # Host-side tests (test/host): the protocol codec against Companion's conformance
   # corpus, and the Satellite classes against mocked Arduino/AsyncTCP, under ASan/UBSan.
@@ -65,7 +68,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [basic, subscriptions, configuration-and-variables, pincode, encoder-led-ring]
+        example:
+          [
+            basic,
+            subscriptions,
+            configuration-and-variables,
+            pincode,
+            encoder-led-ring,
+          ]
         fqbn: [esp32, esp32s2, esp32s3, esp32c3, esp32c6]
     steps:
       - name: Checkout

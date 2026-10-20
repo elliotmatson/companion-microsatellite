@@ -186,7 +186,8 @@ bool isValidStringValue(std::string_view value);
 class LineBuffer
 {
 public:
-    explicit LineBuffer(size_t maxLineLength) : _maxLineLength(maxLineLength) {}
+    explicit LineBuffer(size_t maxLineLength)
+        : _maxLineLength(maxLineLength) {}
 
     /**
      * @brief Add received data, calling onLine(std::string &&line) for each complete line
@@ -367,7 +368,10 @@ std::optional<std::string> base64Decode(std::string_view input);
 
 /** @brief Encode bytes as base64 */
 std::string base64Encode(const uint8_t *data, size_t length);
-inline std::string base64Encode(std::string_view data) { return base64Encode(reinterpret_cast<const uint8_t *>(data.data()), data.size()); }
+inline std::string base64Encode(std::string_view data)
+{
+    return base64Encode(reinterpret_cast<const uint8_t *>(data.data()), data.size());
+}
 
 /** @brief ASCII case-insensitive comparison */
 bool equalsIgnoreCase(std::string_view a, std::string_view b);

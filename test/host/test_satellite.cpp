@@ -42,17 +42,17 @@ static int failures = 0;
 static int checks = 0;
 static const char *currentTest = "";
 
-#define CHECK(cond, ...)                                                        \
-    do                                                                          \
-    {                                                                           \
-        checks++;                                                               \
-        if (!(cond))                                                            \
-        {                                                                       \
-            failures++;                                                         \
+#define CHECK(cond, ...)                                                              \
+    do                                                                                \
+    {                                                                                 \
+        checks++;                                                                     \
+        if (!(cond))                                                                  \
+        {                                                                             \
+            failures++;                                                               \
             printf("FAIL [%s] %s:%d: %s - ", currentTest, __FILE__, __LINE__, #cond); \
-            printf(__VA_ARGS__);                                                \
-            printf("\n");                                                       \
-        }                                                                       \
+            printf(__VA_ARGS__);                                                      \
+            printf("\n");                                                             \
+        }                                                                             \
     } while (0)
 
 // ---------------------------------------------------------------------------

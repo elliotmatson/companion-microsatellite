@@ -247,7 +247,8 @@ std::optional<std::string_view> Params::get(std::string_view key) const
     return param->value;
 }
 
-Message::Message(std::string &&line) : _text(std::move(line))
+Message::Message(std::string &&line)
+    : _text(std::move(line))
 {
     size_t space = _text.find(' ');
     if (space == std::string::npos)

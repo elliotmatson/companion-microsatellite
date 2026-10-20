@@ -214,8 +214,8 @@ private:
     {
         TargetKind kind = TargetKind::CONNECTION;
         SatelliteConnectionState state = SatelliteConnectionState::IDLE; /**< For CONNECTION items */
-        std::string target;                                               /**< Device id or subscription id */
-        std::string coalesceKey;                                          /**< Non-empty when a newer item may replace this one */
+        std::string target;                                              /**< Device id or subscription id */
+        std::string coalesceKey;                                         /**< Non-empty when a newer item may replace this one */
         std::unique_ptr<Message> message;
         size_t bytes = 0;
     };
@@ -237,7 +237,8 @@ private:
     class Lock
     {
     public:
-        explicit Lock(SemaphoreHandle_t mutex) : _mutex(mutex) { xSemaphoreTakeRecursive(_mutex, portMAX_DELAY); }
+        explicit Lock(SemaphoreHandle_t mutex)
+            : _mutex(mutex) { xSemaphoreTakeRecursive(_mutex, portMAX_DELAY); }
         ~Lock() { xSemaphoreGiveRecursive(_mutex); }
         Lock(const Lock &) = delete;
         Lock &operator=(const Lock &) = delete;
@@ -279,6 +280,18 @@ private:
     void remove(SatelliteSubscription &subscription);
     void sendAddSubscription(SatelliteSubscription &subscription);
     bool isBitmapFormatAdvertised(const String &format) const;
+
+    /** @brief Add BITMAP_FORMAT if one was requested and Companion supports it (shared by ADD-DEVICE and ADD-SUB) */
+    void appendBitmapFormat(satellite_protocol::MessageBuilder &command, const std::optional<String> &format) const;
+
+    /**
+     * @brief Split a rotation into the DIRECTION values to send (shared by KEY-ROTATE and SUB-ROTATE)
+     *
+     * With ROTARY_AMOUNT the whole rotation goes in one message (in chunks of up to Companion's
+     * limit), otherwise each step is its own +1/-1 message. Never 0, which Companion reads as a
+     * counter-clockwise step for compatibility.
+     */
+    std::vector<int> rotationDirections(int steps) const;
 
     // --- config API and mDNS (companion-satellite-web.cpp) ---
     void beginWebConfig();

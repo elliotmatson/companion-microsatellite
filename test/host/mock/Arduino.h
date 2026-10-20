@@ -17,7 +17,10 @@
 // ---------------------------------------------------------------------------
 
 extern uint32_t g_mockMillis;
-inline uint32_t millis() { return g_mockMillis; }
+inline uint32_t millis()
+{
+    return g_mockMillis;
+}
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -54,8 +57,14 @@ struct MockSemaphore
 };
 using SemaphoreHandle_t = MockSemaphore *;
 #define portMAX_DELAY 0xffffffffu
-inline SemaphoreHandle_t xSemaphoreCreateRecursiveMutex() { return new MockSemaphore(); }
-inline void vSemaphoreDelete(SemaphoreHandle_t s) { delete s; }
+inline SemaphoreHandle_t xSemaphoreCreateRecursiveMutex()
+{
+    return new MockSemaphore();
+}
+inline void vSemaphoreDelete(SemaphoreHandle_t s)
+{
+    delete s;
+}
 inline int xSemaphoreTakeRecursive(SemaphoreHandle_t s, uint32_t)
 {
     s->mutex.lock();
@@ -88,7 +97,8 @@ class String
 {
 public:
     String() = default;
-    String(const char *value) : _s(value ? value : "") {}
+    String(const char *value)
+        : _s(value ? value : "") {}
     String(const String &) = default;
     String(String &&) = default;
     String &operator=(const String &) = default;
@@ -100,7 +110,8 @@ public:
     }
 
     template <typename T, typename = std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, char> && !std::is_same_v<T, bool>>>
-    explicit String(T value) : _s(std::to_string(value)) {}
+    explicit String(T value)
+        : _s(std::to_string(value)) {}
 
     const char *c_str() const { return _s.c_str(); }
     unsigned int length() const { return static_cast<unsigned int>(_s.size()); }

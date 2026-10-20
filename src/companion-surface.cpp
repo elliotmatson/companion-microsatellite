@@ -14,9 +14,6 @@ using satellite_protocol::MessageBuilder;
 
 [[maybe_unused]] static const char *TAG = "SatelliteSurface";
 
-/** Upper bound Companion applies to a single rotation's step count */
-static constexpr int kMaxRotationSteps = 100;
-
 static String toString(std::string_view value)
 {
     String result;
@@ -96,17 +93,7 @@ std::string SatelliteSurface::buildAddDeviceCommand() const
 
     command.boolean("BRIGHTNESS", _config.supportsBrightness);
 
-    if (_config.bitmapFormat && _config.bitmapFormat->length() > 0)
-    {
-        if (_satellite->isBitmapFormatAdvertised(*_config.bitmapFormat))
-        {
-            command.str("BITMAP_FORMAT", _config.bitmapFormat->c_str());
-        }
-        else
-        {
-            ESP_LOGW(TAG, "Bitmap format '%s' not supported by this Companion, using rgb", _config.bitmapFormat->c_str());
-        }
-    }
+    _satellite->appendBitmapFormat(command, _config.bitmapFormat);
 
     if (_config.canChangePageLabel && _config.canChangePageLabel->length() > 0)
     {
@@ -446,15 +433,8 @@ void SatelliteSurface::sendRotate(const String *controlId, uint16_t index, int s
         return;
     }
 
-    // With ROTARY_AMOUNT the whole rotation goes in one message (in chunks of up to
-    // Companion's limit). Without it, each step is its own +1/-1 message. Never send 0,
-    // which means a counter-clockwise step for compatibility.
-    bool amounts = _satellite->supportsRotaryAmount();
-    while (steps != 0)
+    for (int direction : _satellite->rotationDirections(steps))
     {
-        int chunk = amounts ? std::max(-kMaxRotationSteps, std::min(kMaxRotationSteps, steps)) : (steps > 0 ? 1 : -1);
-        steps -= chunk;
-
         MessageBuilder command("KEY-ROTATE");
         command.deviceId(_surfaceID.c_str());
         if (controlId)
@@ -465,7 +445,7 @@ void SatelliteSurface::sendRotate(const String *controlId, uint16_t index, int s
         {
             command.num("KEY", index);
         }
-        command.num("DIRECTION", chunk);
+        command.num("DIRECTION", direction);
         _satellite->send(command.finish());
     }
 }
