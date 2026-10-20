@@ -1,1277 +1,1247 @@
 /**
  * @file companion-satellite.cpp
- * @brief Implementation of the Companion Satellite API library
+ * @brief The connection to Companion: TCP lifecycle, keepalive, negotiation and dispatch
  * @author Elliot Matson
- * @version 0.0.1
- * @date November 2025
  */
 
 #include "companion-satellite.hpp"
 
 #include <algorithm>
 #include <AsyncTCP.h>
-#include <base64.h>
 #include <MD5Builder.h>
-#include "ArduinoJson.h"
-#include "ESPAsyncWebServer.h"
-#include "mbedtls/base64.h"
-#include "mdns.h"
+#include <new>
+#include <strings.h>
 
-static bool isTokenBoundary(char c)
+using satellite_protocol::ApiVersion;
+using satellite_protocol::Message;
+
+[[maybe_unused]] static const char *TAG = "Satellite";
+
+/** Oldest Companion Satellite API this library talks to */
+static constexpr ApiVersion kMinimumApiVersion{1, 10, 0};
+
+static constexpr uint32_t kTickIntervalMs = 250;
+static constexpr uint32_t kPingIntervalMs = 2000;
+static constexpr uint32_t kConnectTimeoutMs = 10000;
+static constexpr uint32_t kNegotiateTimeoutMs = 10000;
+static constexpr uint32_t kInitialReconnectDelayMs = 1000;
+static constexpr uint32_t kMaxReconnectDelayMs = 30000;
+static constexpr uint32_t kRetiredClientGraceMs = 1000;
+static constexpr uint32_t kRetiredClientMaxAgeMs = 60000;
+static constexpr uint32_t kLoopWarningMs = 5000;
+
+/** Most outgoing data to hold while waiting for TCP send buffer space */
+static constexpr size_t kMaxTxBufferBytes = 16384;
+
+const char *satelliteConnectionStateName(SatelliteConnectionState state)
 {
-    return c == ' ' || c == '\r' || c == '\n' || c == '\t';
-}
-
-static bool parseApiBoolToken(const String &value)
-{
-    return value == "1" || value == "true";
-}
-
-/**
- * @brief Validate a token value for direct inclusion in a quoted API parameter
- */
-static bool isSafeApiTokenValue(const String &value)
-{
-    return value.length() > 0 && value.indexOf('"') == -1 && value.indexOf('\n') == -1 && value.indexOf('\r') == -1;
-}
-
-static bool parseApiSemver(const String &version, uint16_t &major, uint16_t &minor, uint16_t &patch)
-{
-    const char *ptr = version.c_str();
-    char *end = nullptr;
-
-    unsigned long parsedMajor = strtoul(ptr, &end, 10);
-    if (end == ptr || *end != '.')
+    switch (state)
     {
-        return false;
-    }
-
-    ptr = end + 1;
-    unsigned long parsedMinor = strtoul(ptr, &end, 10);
-    if (end == ptr)
-    {
-        return false;
-    }
-
-    unsigned long parsedPatch = 0;
-    if (*end == '.')
-    {
-        ptr = end + 1;
-        parsedPatch = strtoul(ptr, &end, 10);
-        if (end == ptr)
-        {
-            return false;
-        }
-    }
-
-    major = static_cast<uint16_t>(parsedMajor);
-    minor = static_cast<uint16_t>(parsedMinor);
-    patch = static_cast<uint16_t>(parsedPatch);
-    return true;
-}
-
-static bool isVersionAtLeast(uint16_t major, uint16_t minor, uint16_t patch, uint16_t minMajor, uint16_t minMinor, uint16_t minPatch)
-{
-    if (major != minMajor)
-    {
-        return major > minMajor;
-    }
-    if (minor != minMinor)
-    {
-        return minor > minMinor;
-    }
-    return patch >= minPatch;
-}
-
-static uint8_t clampColorComponent(long value)
-{
-    if (value < 0)
-    {
-        return 0;
-    }
-    if (value > 255)
-    {
-        return 255;
-    }
-    return static_cast<uint8_t>(value);
-}
-
-/**
- * @brief Parse a KEY-STATE/SUB-STATE TYPE value, shared by surfaces and subscriptions
- */
-SatelliteSurfaceKeyType parseSatelliteKeyType(const String &typeStr)
-{
-    if (typeStr == "PAGEUP")
-    {
-        return SatelliteSurfaceKeyType::PAGEUP;
-    }
-    if (typeStr == "PAGEDOWN")
-    {
-        return SatelliteSurfaceKeyType::PAGEDOWN;
-    }
-    if (typeStr == "PAGENUM")
-    {
-        return SatelliteSurfaceKeyType::PAGENUM;
-    }
-    return SatelliteSurfaceKeyType::BUTTON;
-}
-
-/**
- * @brief Parse a hex (#RRGGBB) or css rgb(r,g,b) color string, shared by surfaces and subscriptions
- */
-std::optional<color> parseSatelliteColor(const String &value)
-{
-    if (value.startsWith("#") && value.length() == 7)
-    {
-        color c;
-        c.r = strtoul(value.substring(1, 3).c_str(), nullptr, 16);
-        c.g = strtoul(value.substring(3, 5).c_str(), nullptr, 16);
-        c.b = strtoul(value.substring(5, 7).c_str(), nullptr, 16);
-        return c;
-    }
-
-    if (value.startsWith("rgb(") && value.endsWith(")"))
-    {
-        int firstComma = value.indexOf(',');
-        int secondComma = value.indexOf(',', firstComma + 1);
-        if (firstComma != -1 && secondComma != -1)
-        {
-            color c;
-            c.r = clampColorComponent(value.substring(4, firstComma).toInt());
-            c.g = clampColorComponent(value.substring(firstComma + 1, secondComma).toInt());
-            c.b = clampColorComponent(value.substring(secondComma + 1, value.length() - 1).toInt());
-            return c;
-        }
-    }
-
-    return std::nullopt;
-}
-
-ESP_EVENT_DEFINE_BASE(SATELLITE_EVENTS);
-
-/**
- * @brief Convert satellite event ID to human-readable text
- *
- * Utility function to convert event IDs to readable strings for debugging
- * and logging purposes.
- */
-const char *satelliteEventToText(int32_t event_id)
-{
-    switch (event_id)
-    {
-    case SATELLITE_EVENT_READY:
+    case SatelliteConnectionState::IDLE:
+        return "IDLE";
+    case SatelliteConnectionState::CONNECTING:
+        return "CONNECTING";
+    case SatelliteConnectionState::NEGOTIATING:
+        return "NEGOTIATING";
+    case SatelliteConnectionState::READY:
         return "READY";
-    case SATELLITE_EVENT_CONNECTED:
-        return "CONNECTED";
-    case SATELLITE_EVENT_PING_SENT:
-        return "PING_SENT";
-    case SATELLITE_EVENT_PONG_RECEIVED:
-        return "PONG_RECEIVED";
-    case SATELLITE_EVENT_DISCONNECTED:
-        return "DISCONNECTED";
-    default:
-        return "UNKNOWN_EVENT";
+    case SatelliteConnectionState::REJECTED:
+        return "REJECTED";
+    case SatelliteConnectionState::WAITING:
+        return "WAITING";
+    }
+    return "UNKNOWN";
+}
+
+// ---------------------------------------------------------------------------
+// SatelliteEncodedData
+// ---------------------------------------------------------------------------
+
+std::string_view SatelliteEncodedData::mimeType() const
+{
+    if (!isDataUrl())
+    {
+        return {};
+    }
+    size_t end = _value.find_first_of(";,", 5);
+    return end == std::string_view::npos ? std::string_view{} : _value.substr(5, end - 5);
+}
+
+std::string_view SatelliteEncodedData::base64() const
+{
+    if (!isDataUrl())
+    {
+        return _value;
+    }
+    size_t comma = _value.find(',');
+    return comma == std::string_view::npos ? std::string_view{} : _value.substr(comma + 1);
+}
+
+size_t SatelliteEncodedData::decode(uint8_t *out, size_t capacity) const
+{
+    return satellite_protocol::base64Decode(base64(), out, capacity).value_or(0);
+}
+
+static String toString(std::string_view value)
+{
+    String result;
+    result.concat(value.data(), value.size());
+    return result;
+}
+
+void satelliteParseControlState(const satellite_protocol::Params &params, SatelliteControlState &state)
+{
+    std::string_view type = params.get("TYPE").value_or("BUTTON");
+    if (type == "PAGEUP")
+        state.type = SatelliteSurfaceKeyType::PAGEUP;
+    else if (type == "PAGEDOWN")
+        state.type = SatelliteSurfaceKeyType::PAGEDOWN;
+    else if (type == "PAGENUM")
+        state.type = SatelliteSurfaceKeyType::PAGENUM;
+    else
+        state.type = SatelliteSurfaceKeyType::BUTTON;
+
+    if (std::optional<std::string_view> location = params.get("LOCATION"))
+    {
+        state.location = toString(*location);
+    }
+    if (std::optional<std::string_view> bitmap = params.get("BITMAP"))
+    {
+        state.bitmap = SatelliteEncodedData(*bitmap);
+    }
+    if (std::optional<std::string_view> leds = params.get("LEDS"))
+    {
+        state.leds = SatelliteEncodedData(*leds);
+    }
+    if (std::optional<std::string_view> value = params.get("COLOR"))
+    {
+        if (std::optional<satellite_protocol::Rgb> rgb = satellite_protocol::parseColor(*value))
+        {
+            state.keyColor = SatelliteColor{rgb->r, rgb->g, rgb->b};
+        }
+    }
+    if (std::optional<std::string_view> value = params.get("TEXTCOLOR"))
+    {
+        if (std::optional<satellite_protocol::Rgb> rgb = satellite_protocol::parseColor(*value))
+        {
+            state.textColor = SatelliteColor{rgb->r, rgb->g, rgb->b};
+        }
+    }
+    if (std::optional<std::string_view> value = params.get("TEXT"))
+    {
+        std::optional<std::string> decoded = satellite_protocol::base64Decode(*value);
+        state.text = decoded ? toString(*decoded) : String();
+    }
+    if (std::optional<std::string_view> value = params.get("FONT_SIZE"))
+    {
+        // Companion sends "auto" when the button's text size is automatic
+        std::optional<double> size = satellite_protocol::parseNumber(*value);
+        state.fontSize = (size && *size > 0) ? static_cast<uint8_t>(std::min(*size, 255.0)) : 0;
+    }
+    if (params.has("PRESSED"))
+    {
+        state.pressed = params.isTruthy("PRESSED");
     }
 }
 
-/**
- * @brief Constructor for Satellite
- *
- * Initializes the device with a unique name based on the chip MAC address
- * and creates the web server for configuration.
- */
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
 Satellite::Satellite(const char *deviceName, uint16_t apiPort)
+    : _apiPort(apiPort)
 {
-    _apiPort = apiPort;
-    _server = new AsyncWebServer(apiPort);
-    // get chip ID using ESP.getEfuseMac();
     char chipId[18];
     snprintf(chipId, sizeof(chipId), "%llx", ESP.getEfuseMac());
     _deviceName = String(deviceName) + " (" + String(chipId) + ")";
-
-    _hostname = String(DEFAULT_HOSTNAME) + "-" + String(chipId);
+    _hostname = String(kDefaultHostname) + "-" + String(chipId);
 }
 
-/**
- * @brief Destructor for Satellite
- *
- * Disconnects from Companion, stops mDNS, and cleans up the web server.
- */
 Satellite::~Satellite()
 {
-    disconnectFromCompanion();
+    _ticker.detach();
 
-    mdns_free();
-    _server->end();
-    delete _server;
-    _server = nullptr;
+    {
+        Lock lock(_mutex);
+        if (_client)
+        {
+            // Stop it calling back into this object, and close it
+            _client->onConnect(nullptr);
+            _client->onDisconnect(nullptr);
+            _client->onData(nullptr);
+            _client->onAck(nullptr);
+            _client->onError(nullptr);
+            _client->close();
+            // While still connecting, a DNS lookup may be in flight that AsyncTCP will
+            // complete on this client later, so it has to be leaked rather than deleted
+            if (_state != SatelliteConnectionState::CONNECTING)
+            {
+                delete _client;
+            }
+            _client = nullptr;
+        }
+        for (const RetiredClient &retired : _retiredClients)
+        {
+            if (retired.disposed)
+            {
+                delete retired.client;
+            }
+        }
+        _retiredClients.clear();
+    }
+
+    endWebConfig();
+
+    vSemaphoreDelete(_dispatchMutex);
+    vSemaphoreDelete(_mutex);
 }
 
-/**
- * @brief Initialize the satellite
- *
- * Sets up preferences, web server endpoints, mDNS service, and attempts
- * to connect to Companion using stored configuration.
- */
-void Satellite::begin()
+void Satellite::begin(const SatelliteOptions &options)
 {
-    // Initialize default event loop (likely already initialized by Arduino core, but just in case)
-    esp_err_t eventLoopErr = esp_event_loop_create_default();
-    if (eventLoopErr != ESP_OK && eventLoopErr != ESP_ERR_INVALID_STATE)
     {
-        ESP_LOGE("Satellite", "Failed to create default event loop: %d", eventLoopErr);
+        Lock lock(_mutex);
+        if (_begun)
+        {
+            ESP_LOGW(TAG, "begin() called twice, ignoring");
+            return;
+        }
+        _begun = true;
+        _options = options;
+        _rxBuffer.setMaxLineLength(options.maxLineLength);
+        _lastLoopMs = millis();
     }
-    // Initialize preferences
-    // md5 hash deviceName to get a unique namespace
+
+    // Load the saved target. The namespace is derived from the device name, so several
+    // satellites on one chip keep separate settings.
     MD5Builder md5;
     md5.begin();
     md5.add(_deviceName);
     md5.calculate();
     String prefsNamespace = "usat" + md5.toString().substring(0, 8);
-
     _prefs.begin(prefsNamespace.c_str(), false);
-    xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-    _targetHostname = _prefs.getString("host", "");
-    _targetPort = _prefs.getUInt("port", 0);
-    xSemaphoreGiveRecursive(_mutex);
-
-    // Setup http API
-    _server->on("/api/host", HTTP_GET, [&](AsyncWebServerRequest *request)
-                { request->send(200, "text/plain", getTargetHostname()); });
-    _server->on("/api/port", HTTP_GET, [&](AsyncWebServerRequest *request)
-                { request->send(200, "text/plain", String(getTargetPort())); });
-    _server->on("/api/config", HTTP_GET, [&](AsyncWebServerRequest *request)
-                {
-        String json = "{\"host\": \"" + getTargetHostname() + "\", \"port\": " + String(getTargetPort()) + "}";
-        request->send(200, "application/json", json); });
-
-    _server->onRequestBody([&](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
-                           {
-        if (request->method() != HTTP_POST)
-        {
-            return;
-        }
-
-        if (index == 0)
-        {
-            String *body = new String();
-            body->reserve(total);
-            request->_tempObject = body;
-        }
-
-        String *body = static_cast<String *>(request->_tempObject);
-        if (!body)
-        {
-            request->send(500, "text/plain", "Internal Error");
-            return;
-        }
-
-        body->concat(reinterpret_cast<const char *>(data), len);
-        if (index + len != total)
-        {
-            return;
-        }
-
-        String payload = *body;
-        delete body;
-        request->_tempObject = nullptr;
-
-        if (request->url() == "/api/host")
-        {
-            if (request->contentType() == "application/json")
-            {
-                JsonDocument doc;
-                DeserializationError error = deserializeJson(doc, payload);
-                if (!error && doc["host"].is<String>())
-                {
-                    setTargetHostname(doc["host"].as<String>());
-                }
-                else
-                {
-                    request->send(400, "text/plain", "Invalid JSON");
-                    return;
-                }
-            }
-            else
-            {
-                setTargetHostname(payload);
-            }
-            request->send(200, "text/plain", "OK");
-        }
-        else if (request->url() == "/api/port")
-        {
-            JsonDocument doc;
-            DeserializationError error = deserializeJson(doc, payload);
-            if (!error && doc["port"].is<uint16_t>())
-            {
-                setTargetPort(doc["port"].as<uint16_t>());
-            }
-            else
-            {
-                // Assume plain text
-                setTargetPort(payload.toInt());
-            }
-            request->send(200, "text/plain", "OK");
-        }
-        else if (request->url() == "/api/config")
-        {
-            JsonDocument doc;
-            DeserializationError error = deserializeJson(doc, payload);
-            if (!error)
-            {
-                if (doc["host"].is<String>())
-                {
-                    setTargetHostname(doc["host"].as<String>());
-                }
-                if (doc["port"].is<uint16_t>())
-                {
-                    setTargetPort(doc["port"].as<uint16_t>());
-                }
-                request->send(200, "text/plain", "OK");
-            }
-            else
-            {
-                request->send(400, "text/plain", "Invalid JSON");
-            }
-        }
-        else
-        {
-            request->send(404, "text/plain", "Not Found");
-        } });
-
-    _server->begin();
-
-    // Setup mDNS
-    esp_err_t err = mdns_init();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE)
+    bool targetSetInCode;
     {
-        ESP_LOGE("mdns", "MDNS Init failed: %d", err);
+        Lock lock(_mutex);
+        targetSetInCode = _targetHostname.length() > 0;
+        if (!targetSetInCode)
+        {
+            _targetHostname = _prefs.getString("host", "");
+            _targetPort = _prefs.getUInt("port", 0);
+        }
+    }
+    if (targetSetInCode)
+    {
+        // setTarget() before begin() wins over (and replaces) whatever was saved
+        saveTarget();
     }
 
-    // set hostname
-    mdns_hostname_set(_hostname.c_str());
-    // set default instance
-    mdns_instance_name_set(_deviceName.c_str());
+    if (options.webConfig)
+    {
+        beginWebConfig();
+    }
+    if (options.mdns)
+    {
+        beginMdns();
+    }
 
-    mdns_txt_item_t serviceTxtData[1] = {
-        {"restEnabled", "true"}};
-    mdns_service_add(NULL, "_companion-satellite", "_tcp", _apiPort, serviceTxtData, 1);
+    _ticker.attach_ms(kTickIntervalMs, [this]()
+                      { tick(); });
 
-    Satellite *eventSource = this;
-    esp_event_post(SATELLITE_EVENTS, SATELLITE_EVENT_READY, &eventSource, sizeof(eventSource), portMAX_DELAY);
-
-    // connect to companion
+    Lock lock(_mutex);
     connectToCompanion();
 }
 
-/**
- * @brief Disconnect from Companion server
- *
- * Safely closes the TCP connection, sends QUIT command, and stops timers.
- */
-void Satellite::disconnectFromCompanion()
+void Satellite::loop()
 {
-    xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-    if (_client)
+    drainQueue();
+}
+
+// ---------------------------------------------------------------------------
+// Target and status
+// ---------------------------------------------------------------------------
+
+String Satellite::getTargetHostname() const
+{
+    Lock lock(_mutex);
+    return _targetHostname;
+}
+
+uint16_t Satellite::getTargetPort() const
+{
+    Lock lock(_mutex);
+    return _targetPort;
+}
+
+void Satellite::setTargetHostname(const String &hostname)
+{
+    setTarget(hostname, getTargetPort());
+}
+
+void Satellite::setTargetPort(uint16_t port)
+{
+    setTarget(getTargetHostname(), port);
+}
+
+void Satellite::setTarget(const String &hostname, uint16_t port)
+{
+    ESP_LOGI(TAG, "Setting target: %s:%u", hostname.c_str(), port);
     {
-        if (_client->connected())
+        Lock lock(_mutex);
+        _targetHostname = hostname;
+        _targetPort = port;
+        _reconnectDelayMs = kInitialReconnectDelayMs;
+    }
+    saveTarget();
+
+    Lock lock(_mutex);
+    if (_begun)
+    {
+        connectToCompanion();
+    }
+}
+
+void Satellite::saveTarget()
+{
+    String host;
+    uint16_t port;
+    {
+        Lock lock(_mutex);
+        if (!_begun)
         {
-            ESP_LOGI("Satellite", "Connected to companion, disconnecting");
-            _client->write("QUIT\n");
-            _client->close();
+            return; // Preferences aren't open yet, begin() will load whatever was saved before
         }
-        delete _client;
-        _client = nullptr;
+        host = _targetHostname;
+        port = _targetPort;
     }
-    xSemaphoreGiveRecursive(_mutex);
-
-    if (_keepaliveTicker.active())
-    {
-        _keepaliveTicker.detach();
-    }
+    _prefs.putString("host", host);
+    _prefs.putUInt("port", port);
 }
 
-/**
- * @brief Arm the reconnect timer, unless reconnection is permanently disabled
- *
- * Shared by the onDisconnect handler and by connectToCompanion() itself, for
- * when the initial (synchronous) AsyncClient::connect() call fails and no
- * onDisconnect callback will ever fire for that attempt.
- */
-void Satellite::scheduleReconnect()
+String Satellite::getCompanionVersion() const
 {
-    if (lockedRead(_apiVersionRejected))
-    {
-        ESP_LOGE("Satellite", "Reconnect disabled until host/port changes because server API is below 1.10.0");
-        return;
-    }
-
-    // try to reconnect every 5s using _reconnectTicker
-    _reconnectTicker.attach(5, [&]()
-                            {
-                                ESP_LOGI("Satellite", "Reconnecting to companion...");
-                                connectToCompanion(); });
+    Lock lock(_mutex);
+    return _companionVersion;
 }
 
-/**
- * @brief Connect to Companion server
- *
- * Creates a new TCP connection to the configured Companion server.
- * Sets up event handlers for connection, disconnection, data reception,
- * and error handling. Automatically registers all surfaces upon connection.
- */
-void Satellite::connectToCompanion()
+String Satellite::getSatelliteApiVersion() const
 {
-    if (lockedRead(_apiVersionRejected))
-    {
-        ESP_LOGE("Satellite", "Connection blocked: remote API version is below required 1.10.0");
-        return;
-    }
-
-    disconnectFromCompanion();
-
-    String targetHostname = getTargetHostname();
-    uint16_t targetPort = getTargetPort();
-    if (targetHostname.length() == 0 || targetPort == 0)
-    {
-        ESP_LOGE("Satellite", "Target hostname or port not set");
-        return;
-    }
-
-    xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-    _client = new AsyncClient();
-    if (!_client)
-    {
-        ESP_LOGE("Satellite", "Failed to create client");
-        xSemaphoreGiveRecursive(_mutex);
-        return;
-    }
-
-    _client->onConnect([&](void *arg, AsyncClient *client)
-                       {
-                           ESP_LOGI("Satellite", "Connected to companion");
-                           xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-                           _isConnected = true;
-                           _apiNegotiated = false;
-                           _satelliteApiVersionValid = false;
-                           _capsSubscriptions = false;
-                           _capsNonsquare = false;
-                           _capsBitmapFormats.clear();
-                           xSemaphoreGiveRecursive(_mutex);
-                           Satellite *eventSource = this;
-                           esp_event_post(SATELLITE_EVENTS, SATELLITE_EVENT_CONNECTED, &eventSource, sizeof(eventSource), portMAX_DELAY);
-                           // Cancel any existing reconnect attempts
-                           _reconnectTicker.detach();
-                           // Start the keepalive timer
-                           _keepaliveTicker.attach(2.0, [&]()
-                                                   {
-                                                    // Send keepalive message
-                                                    send("PING usat-" + String(millis()) + "\n");
-                                                    Satellite *eventSource = this;
-                                                    esp_event_post(SATELLITE_EVENTS, SATELLITE_EVENT_PING_SENT, &eventSource, sizeof(eventSource), portMAX_DELAY); });
-                           // Surfaces are registered after BEGIN once ApiVersion is validated.
-                       });
-    _client->onDisconnect([&](void *arg, AsyncClient *client)
-                          {
-                            ESP_LOGW("Satellite", "Disconnected from companion");
-                            xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-                            _isConnected = false;
-                            _apiNegotiated = false;
-                            xSemaphoreGiveRecursive(_mutex);
-                            Satellite *eventSource = this;
-                            esp_event_post(SATELLITE_EVENTS, SATELLITE_EVENT_DISCONNECTED, &eventSource, sizeof(eventSource), portMAX_DELAY);
-                            // Stop the keepalive timer
-                            _keepaliveTicker.detach();
-                            scheduleReconnect(); });
-    _client->onError([](void *arg, AsyncClient *client, int8_t error)
-                     { ESP_LOGE("Satellite", "Connection error: %d", error); });
-    _client->onData([&](void *arg, AsyncClient *client, void *data, size_t len)
-                    { receiveCallback(arg, client, data, len); });
-
-    if (!_client->connect(targetHostname.c_str(), targetPort))
-    {
-        ESP_LOGE("Satellite", "Failed to connect to %s:%d", targetHostname.c_str(), targetPort);
-        delete _client;
-        _client = nullptr;
-        xSemaphoreGiveRecursive(_mutex);
-        // connect() failing synchronously never triggers onDisconnect, so we
-        // must arm the retry ourselves or the satellite would be stuck.
-        scheduleReconnect();
-        return;
-    }
-    xSemaphoreGiveRecursive(_mutex);
+    Lock lock(_mutex);
+    return _apiVersionText;
 }
 
-/**
- * @brief Send a message to Companion
- *
- * Thread-safe method to send data over the TCP connection.
- * Only sends if client is connected.
- */
-void Satellite::send(const String &message)
+SatelliteConnectionState Satellite::getConnectionState() const
 {
-    ESP_LOGD("Satellite", "Sending: %s", message.c_str());
-    xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-    if (_client && _client->connected())
+    Lock lock(_mutex);
+    return _state;
+}
+
+bool Satellite::isConnected() const
+{
+    Lock lock(_mutex);
+    return _client != nullptr && (_state == SatelliteConnectionState::NEGOTIATING || _state == SatelliteConnectionState::READY);
+}
+
+bool Satellite::hasFeature(SatelliteFeature feature) const
+{
+    Lock lock(_mutex);
+    if (!_apiVersion || !_caps)
     {
-        _client->write(message.c_str(), message.length());
+        return false;
+    }
+    return satellite_protocol::isFeatureEnabled(feature, *_apiVersion, &_caps->params());
+}
+
+std::vector<String> Satellite::getCapsBitmapFormats() const
+{
+    Lock lock(_mutex);
+    return _capsBitmapFormats;
+}
+
+bool Satellite::isBitmapFormatAdvertised(const String &format) const
+{
+    Lock lock(_mutex);
+    if (format == "rgb")
+    {
+        return true; // always supported, and the default
+    }
+    if (!hasFeature(SatelliteFeature::BitmapFormats))
+    {
+        return false;
+    }
+    return std::find(_capsBitmapFormats.begin(), _capsBitmapFormats.end(), format) != _capsBitmapFormats.end();
+}
+
+void Satellite::appendBitmapFormat(satellite_protocol::MessageBuilder &command, const std::optional<String> &format) const
+{
+    if (!format || format->length() == 0)
+    {
+        return;
+    }
+    if (isBitmapFormatAdvertised(*format))
+    {
+        command.str("BITMAP_FORMAT", format->c_str());
     }
     else
     {
-        ESP_LOGW("Satellite", "Not connected to companion, cannot send message");
+        ESP_LOGW(TAG, "Bitmap format '%s' not supported by this Companion, using rgb", format->c_str());
     }
-    xSemaphoreGiveRecursive(_mutex);
+}
+
+std::vector<int> Satellite::rotationDirections(int steps) const
+{
+    /** Upper bound Companion applies to a single rotation's step count */
+    constexpr int kMaxRotationSteps = 100;
+
+    std::vector<int> directions;
+    bool amounts = supportsRotaryAmount();
+    while (steps != 0)
+    {
+        int chunk = amounts ? std::max(-kMaxRotationSteps, std::min(kMaxRotationSteps, steps)) : (steps > 0 ? 1 : -1);
+        directions.push_back(chunk);
+        steps -= chunk;
+    }
+    return directions;
+}
+
+// ---------------------------------------------------------------------------
+// Connection (all called with _mutex held)
+// ---------------------------------------------------------------------------
+
+void Satellite::setState(SatelliteConnectionState state)
+{
+    if (_state == state)
+    {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Connection state: %s -> %s", satelliteConnectionStateName(_state), satelliteConnectionStateName(state));
+    _state = state;
+    _stateSinceMs = millis();
+
+    QueuedItem item;
+    item.kind = TargetKind::CONNECTION;
+    item.state = state;
+    enqueue(std::move(item));
+}
+
+void Satellite::retireClient()
+{
+    if (!_client)
+    {
+        return;
+    }
+
+    AsyncClient *client = _client;
+    _client = nullptr;
+    _retiredClients.push_back({client, millis(), false, 0});
+    resetRegistrations();
+    _txBuffer.clear();
+
+    // If there is a connection, this calls onDisconnect synchronously, which marks it
+    // disposed. Without one (eg. still resolving the hostname) that happens later.
+    client->close();
+}
+
+void Satellite::resetRegistrations()
+{
+    for (SatelliteSurface *surface : _surfaces)
+    {
+        surface->_registered = false;
+    }
+    for (SatelliteSubscription *subscription : _subscriptions)
+    {
+        subscription->_active = false;
+    }
+    _pendingAddSubs.clear();
+}
+
+void Satellite::connectToCompanion()
+{
+    retireClient();
+    resetRegistrations();
+    _txBuffer.clear();
+    _txBuffer.shrink_to_fit();
+    _caps.reset();
+    _apiVersion.reset();
+    _capsBitmapFormats.clear();
+
+    if (_targetHostname.length() == 0 || _targetPort == 0)
+    {
+        ESP_LOGW(TAG, "Companion host/port not set - configure it via the REST API or setTarget()");
+        setState(SatelliteConnectionState::IDLE);
+        return;
+    }
+
+    AsyncClient *client = new (std::nothrow) AsyncClient();
+    if (!client)
+    {
+        ESP_LOGE(TAG, "Out of memory creating client");
+        scheduleReconnect();
+        return;
+    }
+
+    client->onConnect([this](void *, AsyncClient *c)
+                      { onClientConnect(c); });
+    client->onDisconnect([this](void *, AsyncClient *c)
+                         { onClientDisconnect(c); });
+    client->onData([this](void *, AsyncClient *c, void *data, size_t length)
+                   { onClientData(c, static_cast<const char *>(data), length); });
+    client->onAck([this](void *, AsyncClient *c, size_t, uint32_t)
+                  {
+                      Lock lock(_mutex);
+                      if (c == _client)
+                      {
+                          flushTx();
+                      } });
+    client->onError([](void *, AsyncClient *, int8_t error)
+                    { ESP_LOGW(TAG, "Connection error: %s", AsyncClient::errorToString(error)); });
+
+    _client = client;
+    setState(SatelliteConnectionState::CONNECTING);
+    ESP_LOGI(TAG, "Connecting to %s:%u", _targetHostname.c_str(), _targetPort);
+
+    if (!client->connect(_targetHostname.c_str(), _targetPort))
+    {
+        // A synchronous failure never calls onDisconnect, so retry from here
+        ESP_LOGW(TAG, "Failed to start connecting to %s:%u", _targetHostname.c_str(), _targetPort);
+        _client = nullptr;
+        _retiredClients.push_back({client, millis(), false, 0});
+        scheduleReconnect();
+    }
+}
+
+void Satellite::scheduleReconnect()
+{
+    _reconnectAtMs = millis() + _reconnectDelayMs;
+    ESP_LOGI(TAG, "Reconnecting in %u ms", static_cast<unsigned>(_reconnectDelayMs));
+    _reconnectDelayMs = std::min(_reconnectDelayMs * 2, kMaxReconnectDelayMs);
+    setState(SatelliteConnectionState::WAITING);
 }
 
 /**
- * @brief Add a button subscription with simple style flags (API >= 1.10.0)
- *
- * Validates required fields and protocol-safe string inputs before sending.
- * This implementation intentionally supports only simple style parameters,
- * and does not send advanced STYLE payloads.
+ * Housekeeping, every kTickIntervalMs on the esp_timer task: reconnects, timeouts,
+ * keepalive pings, flushing the send buffer and freeing retired clients.
  */
-void Satellite::addSubscription(const String &subId, const String &location, std::optional<uint16_t> bitmapSize,
-                                std::optional<String> bitmapFormat,
-                                std::optional<bool> colors,
-                                std::optional<bool> text,
-                                std::optional<bool> textStyle)
+void Satellite::tick()
 {
-    if (!lockedRead(_apiNegotiated))
     {
-        ESP_LOGW("Satellite", "Cannot ADD-SUB before API negotiation is complete");
-        return;
-    }
+        Lock lock(_mutex);
+        uint32_t now = millis();
 
-    if (!isSafeApiTokenValue(subId))
-    {
-        ESP_LOGW("Satellite", "Invalid ADD-SUB SUBID (must be non-empty and must not contain quotes/newlines)");
-        return;
-    }
-
-    if (!isSafeApiTokenValue(location))
-    {
-        ESP_LOGW("Satellite", "Invalid ADD-SUB LOCATION (must be non-empty and must not contain quotes/newlines)");
-        return;
-    }
-
-    String command;
-    command.reserve(64 + subId.length() + location.length());
-    command = "ADD-SUB SUBID=\"" + subId + "\" LOCATION=\"" + location + "\"";
-
-    if (bitmapSize.has_value())
-    {
-        // Per the API, 0 explicitly means "do not stream bitmaps" - any other
-        // value is the requested square pixel size, passed through as-is.
-        command += " BITMAP=" + String(bitmapSize.value());
-        if (bitmapSize.value() > 0)
+        for (auto it = _retiredClients.begin(); it != _retiredClients.end();)
         {
-            warnIfBitmapSizeTooLarge("ADD-SUB", bitmapSize.value());
-        }
-    }
-
-    if (bitmapFormat.has_value())
-    {
-        appendBitmapFormatParam(command, "ADD-SUB", bitmapFormat.value());
-    }
-
-    if (colors.has_value())
-    {
-        command += " COLORS=";
-        command += colors.value() ? "1" : "0";
-    }
-
-    if (text.has_value())
-    {
-        command += " TEXT=";
-        command += text.value() ? "1" : "0";
-    }
-
-    if (textStyle.has_value())
-    {
-        command += " TEXT_STYLE=";
-        command += textStyle.value() ? "1" : "0";
-    }
-
-    command += "\n";
-    send(command);
-}
-
-/**
- * @brief Remove a button subscription by id (API >= 1.10.0)
- */
-void Satellite::removeSubscription(const String &subId)
-{
-    if (!lockedRead(_apiNegotiated))
-    {
-        ESP_LOGW("Satellite", "Cannot REMOVE-SUB before API negotiation is complete");
-        return;
-    }
-
-    if (!isSafeApiTokenValue(subId))
-    {
-        ESP_LOGW("Satellite", "Invalid REMOVE-SUB SUBID");
-        return;
-    }
-
-    send("REMOVE-SUB SUBID=\"" + subId + "\"\n");
-}
-
-/**
- * @brief Send a subscribed control press/release or rotate event (API >= 1.10.0)
- *
- * Mirrors SatelliteSurface::buttonAction: PRESSED/RELEASED dispatch to
- * SUB-PRESS, RIGHT/LEFT dispatch to SUB-ROTATE.
- */
-void Satellite::subscriptionAction(const String &subId, SatelliteAction action)
-{
-    if (!lockedRead(_apiNegotiated))
-    {
-        ESP_LOGW("Satellite", "Cannot send subscription action before API negotiation is complete");
-        return;
-    }
-
-    if (!isSafeApiTokenValue(subId))
-    {
-        ESP_LOGW("Satellite", "Invalid subscription action SUBID");
-        return;
-    }
-
-    switch (action)
-    {
-    case SatelliteAction::PRESSED:
-        send("SUB-PRESS SUBID=\"" + subId + "\" PRESSED=1\n");
-        break;
-    case SatelliteAction::RELEASED:
-        send("SUB-PRESS SUBID=\"" + subId + "\" PRESSED=0\n");
-        break;
-    case SatelliteAction::RIGHT:
-        send("SUB-ROTATE SUBID=\"" + subId + "\" DIRECTION=1\n");
-        break;
-    case SatelliteAction::LEFT:
-        send("SUB-ROTATE SUBID=\"" + subId + "\" DIRECTION=-1\n");
-        break;
-    default:
-        ESP_LOGE("Satellite", "Invalid subscription action: %d", static_cast<int>(action));
-        return;
-    }
-}
-
-/**
- * @brief Callback for receiving data from Companion
- *
- * Processes incoming messages from Companion and handles various command types:
- * - PING: Responds with PONG for keepalive
- * - PONG: Posts SATELLITE_EVENT_PONG_RECEIVED event
- * - BEGIN: Validates ApiVersion and registers queued surfaces
- * - CAPS: Records server capabilities (subscriptions, non-square, bitmap formats)
- * - ERROR: Logs error messages from Companion
- * - SUB-STATE: Builds a SubscriptionState and invokes onSubscriptionState
- * - Device-specific messages: Routes messages containing DEVICEID to appropriate surfaces
- *
- * Messages are processed line by line, with timing measurements for performance monitoring.
- */
-void Satellite::receiveCallback(void *arg, AsyncClient *client, void *data, size_t len)
-{
-    if (len == 0)
-    {
-        return;
-    }
-
-    if (_rxBuffer.length() + len > MAX_RX_BUFFER_SIZE)
-    {
-        ESP_LOGW("Satellite", "RX buffer exceeded %u bytes, dropping buffered data", static_cast<unsigned>(MAX_RX_BUFFER_SIZE));
-        _rxBuffer = "";
-    }
-
-    // Buffer TCP chunks and process complete lines only.
-    _rxBuffer.concat(static_cast<const char *>(data), len);
-
-    int end = _rxBuffer.indexOf('\n');
-    while (end != -1)
-    {
-        String received = _rxBuffer.substring(0, end);
-        _rxBuffer.remove(0, end + 1);
-        if (received.endsWith("\r"))
-        {
-            received.remove(received.length() - 1);
-        }
-
-        unsigned long startTime = micros();
-        ESP_LOGD("Satellite", "Received data: %s", received.c_str());
-        if (received.startsWith("PING"))
-        {
-            String payload = "";
-            if (received.length() > 5 && received.charAt(4) == ' ')
+            bool expired = it->disposed ? (now - it->disposedAt >= kRetiredClientGraceMs)
+                                        : (now - it->retiredAt >= kRetiredClientMaxAgeMs && it->client->free());
+            if (expired)
             {
-                payload = received.substring(5);
-            }
-
-            if (payload.length() > 0)
-            {
-                send("PONG " + payload + "\n");
+                delete it->client;
+                it = _retiredClients.erase(it);
             }
             else
             {
-                send("PONG\n");
+                ++it;
             }
         }
-        else if (received.startsWith("PONG"))
+
+        switch (_state)
         {
-            Satellite *eventSource = this;
-            esp_event_post(SATELLITE_EVENTS, SATELLITE_EVENT_PONG_RECEIVED, &eventSource, sizeof(eventSource), portMAX_DELAY);
+        case SatelliteConnectionState::WAITING:
+            if (static_cast<int32_t>(now - _reconnectAtMs) >= 0)
+            {
+                connectToCompanion();
+            }
+            break;
+
+        case SatelliteConnectionState::CONNECTING:
+            if (now - _stateSinceMs >= kConnectTimeoutMs)
+            {
+                ESP_LOGW(TAG, "Timed out connecting to Companion");
+                retireClient();
+                scheduleReconnect();
+            }
+            break;
+
+        case SatelliteConnectionState::NEGOTIATING:
+        case SatelliteConnectionState::READY:
+            if (_state == SatelliteConnectionState::NEGOTIATING && now - _stateSinceMs >= kNegotiateTimeoutMs)
+            {
+                ESP_LOGW(TAG, "Timed out waiting for BEGIN/CAPS from Companion");
+                retireClient();
+                scheduleReconnect();
+                break;
+            }
+            if (now - _lastRxMs >= _options.keepaliveTimeoutMs)
+            {
+                // Catches a half-open connection (Companion's host lost power, the access
+                // point went away...) which TCP alone may not notice for minutes.
+                ESP_LOGW(TAG, "Nothing received from Companion for %u ms, reconnecting", static_cast<unsigned>(now - _lastRxMs));
+                retireClient();
+                scheduleReconnect();
+                break;
+            }
+            if (now - _lastPingMs >= kPingIntervalMs)
+            {
+                _lastPingMs = now;
+                send("PING usat\n");
+            }
+            flushTx();
+            break;
+
+        case SatelliteConnectionState::IDLE:
+        case SatelliteConnectionState::REJECTED:
+            break;
         }
-        else if (received.startsWith("BEGIN"))
+
+        if (_options.dispatch == SatelliteDispatchMode::LOOP && !_queue.empty() && !_loopWarningLogged &&
+            now - _lastLoopMs >= kLoopWarningMs)
         {
-            std::vector<ApiParam> tokens = tokenizeApiParams(received);
-
-            xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-
-            ApiParam versionParam = findApiParam(tokens, "CompanionVersion");
-            if (versionParam.val.has_value())
-            {
-                _companionVersion = versionParam.val.value();
-            }
-
-            ApiParam apiVersionParam = findApiParam(tokens, "ApiVersion");
-            if (apiVersionParam.val.has_value())
-            {
-                _satelliteApiVersion = apiVersionParam.val.value();
-                _satelliteApiVersionValid = parseApiSemver(_satelliteApiVersion, _satelliteApiMajor, _satelliteApiMinor, _satelliteApiPatch);
-            }
-
-            if (!_satelliteApiVersionValid)
-            {
-                ESP_LOGE("Satellite", "Invalid or missing ApiVersion from Companion BEGIN: '%s'", _satelliteApiVersion.c_str());
-                _apiVersionRejected = true;
-                xSemaphoreGiveRecursive(_mutex);
-                disconnectFromCompanion();
-                return;
-            }
-
-            if (!isVersionAtLeast(_satelliteApiMajor, _satelliteApiMinor, _satelliteApiPatch, 1, 10, 0))
-            {
-                ESP_LOGE("Satellite", "Companion Satellite ApiVersion %s is below minimum supported 1.10.0", _satelliteApiVersion.c_str());
-                _apiVersionRejected = true;
-                xSemaphoreGiveRecursive(_mutex);
-                disconnectFromCompanion();
-                return;
-            }
-
-            _apiVersionRejected = false;
-            _apiNegotiated = true;
-
-            ESP_LOGI("Satellite", "Connected to Companion version %s, Satellite API version %s", _companionVersion.c_str(), _satelliteApiVersion.c_str());
-
-            // Register all known surfaces only after we validate protocol compatibility.
-            for (const auto &surface : _surfaces)
-            {
-                sendAddCommand(*surface);
-            }
-
-            xSemaphoreGiveRecursive(_mutex);
+            ESP_LOGW(TAG, "Satellite::loop() hasn't been called for %u ms - callbacks only run inside it (or use SatelliteDispatchMode::IMMEDIATE)",
+                     static_cast<unsigned>(now - _lastLoopMs));
+            _loopWarningLogged = true;
         }
-        else if (received.startsWith("CAPS"))
-        {
-            ESP_LOGI("Satellite", "Server capabilities: %s", received.c_str());
+    }
 
-            std::vector<ApiParam> tokens = tokenizeApiParams(received);
-
-            xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-
-            ApiParam subscriptionsParam = findApiParam(tokens, "SUBSCRIPTIONS");
-            if (subscriptionsParam.val.has_value())
-            {
-                _capsSubscriptions = parseApiBoolToken(subscriptionsParam.val.value());
-            }
-
-            ApiParam nonsquareParam = findApiParam(tokens, "NONSQUARE");
-            if (nonsquareParam.val.has_value())
-            {
-                _capsNonsquare = parseApiBoolToken(nonsquareParam.val.value());
-            }
-
-            ApiParam bitmapFormatsParam = findApiParam(tokens, "BITMAP_FORMATS");
-            _capsBitmapFormats.clear();
-            if (bitmapFormatsParam.val.has_value())
-            {
-                String formats = bitmapFormatsParam.val.value();
-                int start = 0;
-                while (start <= formats.length())
-                {
-                    int comma = formats.indexOf(',', start);
-                    String token = comma == -1 ? formats.substring(start) : formats.substring(start, comma);
-                    token.trim();
-                    if (token.length() > 0)
-                    {
-                        _capsBitmapFormats.push_back(token);
-                    }
-
-                    if (comma == -1)
-                    {
-                        break;
-                    }
-                    start = comma + 1;
-                }
-            }
-
-            xSemaphoreGiveRecursive(_mutex);
-        }
-        else if (received.startsWith("ERROR"))
-        {
-            String errorMsg = received.substring(received.indexOf("MESSAGE=") + 8);
-            errorMsg.replace("\"", "");
-            ESP_LOGE("Satellite", "Error from Companion: %s", errorMsg.c_str());
-        }
-        else if (received.indexOf(" ERROR ") != -1)
-        {
-            ESP_LOGE("Satellite", "Command error from Companion: %s", received.c_str());
-        }
-        else if (received.startsWith("SUB-STATE"))
-        {
-            std::vector<ApiParam> tokens = tokenizeApiParams(received);
-            ApiParam subIdParam = findApiParam(tokens, "SUBID");
-            if (!subIdParam.val.has_value())
-            {
-                ESP_LOGW("Satellite", "SUB-STATE missing SUBID: %s", received.c_str());
-            }
-            else
-            {
-                SubscriptionState state;
-                state.subId = subIdParam.val.value();
-
-                ApiParam typeParam = findApiParam(tokens, "TYPE");
-                state.type = parseSatelliteKeyType(typeParam.val.value_or("BUTTON"));
-
-                ApiParam locationParam = findApiParam(tokens, "LOCATION");
-                if (locationParam.val.has_value())
-                {
-                    state.location = locationParam.val.value();
-                }
-
-                ApiParam bitmapParam = findApiParam(tokens, "BITMAP");
-                if (bitmapParam.val.has_value())
-                {
-                    state.bitmap = bitmapParam.val.value();
-                }
-
-                ApiParam colorParam = findApiParam(tokens, "COLOR");
-                if (colorParam.val.has_value())
-                {
-                    state.keyColor = parseSatelliteColor(colorParam.val.value());
-                }
-
-                ApiParam textColorParam = findApiParam(tokens, "TEXTCOLOR");
-                if (textColorParam.val.has_value())
-                {
-                    state.textColor = parseSatelliteColor(textColorParam.val.value());
-                }
-
-                ApiParam textParam = findApiParam(tokens, "TEXT", true);
-                if (textParam.val.has_value())
-                {
-                    state.text = textParam.val.value();
-                }
-
-                ApiParam fontSizeParam = findApiParam(tokens, "FONT_SIZE");
-                if (fontSizeParam.val.has_value())
-                {
-                    state.fontSize = static_cast<uint8_t>(fontSizeParam.val.value().toInt());
-                }
-
-                ApiParam pressedParam = findApiParam(tokens, "PRESSED");
-                if (pressedParam.val.has_value())
-                {
-                    state.pressed = parseApiBoolToken(pressedParam.val.value());
-                }
-
-                if (onSubscriptionState)
-                {
-                    onSubscriptionState(state);
-                }
-            }
-        }
-        else if (received.indexOf("DEVICEID=") != -1)
-        {
-            // Likely a device-specific message, like "KEY-STATE DEVICEID=00000 KEY=0 BITMAP=abcabcabc COLOR=#00ff00 TEXT="abcabcabc""
-            // get device ID from message
-            ESP_LOGD("Satellite", "Device-specific message: %s", received.c_str());
-            int deviceIdStart = received.indexOf("DEVICEID=") + 9;
-            int deviceIdEnd = received.indexOf(' ', deviceIdStart);
-            if (deviceIdEnd == -1)
-            {
-                deviceIdEnd = received.length();
-            }
-            String deviceID = received.substring(deviceIdStart, deviceIdEnd);
-            deviceID.replace("\"", "");
-            // find surface with this ID
-            xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-            for (const auto &surface : _surfaces)
-            {
-                if (surface->getID() == deviceID)
-                {
-                    surface->handleMessage(received);
-                    break;
-                }
-            }
-            xSemaphoreGiveRecursive(_mutex);
-        }
-        else
-        {
-            ESP_LOGW("Satellite", "Unknown message received: %s", received.c_str());
-        }
-        end = _rxBuffer.indexOf('\n');
-        unsigned long endTime = micros();
-        ESP_LOGD("Satellite", "Processed message in %lu microseconds", endTime - startTime);
+    if (_options.dispatch == SatelliteDispatchMode::IMMEDIATE)
+    {
+        drainQueue();
     }
 }
 
-/**
- * @brief Send an ADD-DEVICE command for a surface
- *
- * Constructs and sends a complete ADD-DEVICE command to Companion including
- * all surface configuration parameters, capabilities, and variable definitions.
- * The command includes surface layout, feature support flags, pincode support
- * level, and a base64-encoded JSON array of associated variables.
- */
-void Satellite::sendAddCommand(SatelliteSurface &surface)
+void Satellite::onClientConnect(AsyncClient *client)
 {
-    ESP_LOGI("Satellite", "Adding surface: %s", surface.getID().c_str());
-    const SatelliteSurfaceConfig &config = surface.getConfig();
-    const std::vector<SatelliteSurfaceVariable> &variables = surface.getVariables();
-
-    String addDeviceCommand;
-    addDeviceCommand.reserve(256 + surface.getID().length() + surface.getName().length());
-    addDeviceCommand = "ADD-DEVICE DEVICEID=" + surface.getID() +
-                       " PRODUCT_NAME=\"" + surface.getName() +
-                       "\" KEYS_TOTAL=" + String(config.totalKeys) +
-                       " KEYS_PER_ROW=" + String(config.keysPerRow) +
-                       " BITMAPS=" + (config.bitmapSize.has_value() ? String(config.bitmapSize.value()) : String("false")) +
-                       " COLORS=" + (config.sendColors ? "true" : "false") +
-                       " TEXT=" + (config.sendText ? "true" : "false") +
-                       " TEXT_STYLE=" + String(config.sendTextStyle ? "true" : "false") +
-                       " BRIGHTNESS=" + String(config.supportsBrightness ? "true" : "false");
-
-    if (config.bitmapSize.has_value())
     {
-        warnIfBitmapSizeTooLarge("ADD-DEVICE", config.bitmapSize.value());
-
-        if (config.bitmapFormat.has_value())
+        Lock lock(_mutex);
+        if (client != _client)
         {
-            appendBitmapFormatParam(addDeviceCommand, "ADD-DEVICE", config.bitmapFormat.value());
+            // A retired client whose DNS lookup finished after we gave up on it
+            client->close();
+            return;
+        }
+
+        _rxBuffer.clear();
+        _lastRxMs = millis();
+        _lastPingMs = _lastRxMs;
+        client->setNoDelay(true);
+        setState(SatelliteConnectionState::NEGOTIATING);
+    }
+
+    if (_options.dispatch == SatelliteDispatchMode::IMMEDIATE)
+    {
+        drainQueue();
+    }
+}
+
+void Satellite::onClientDisconnect(AsyncClient *client)
+{
+    {
+        Lock lock(_mutex);
+        uint32_t now = millis();
+
+        if (client != _client)
+        {
+            for (RetiredClient &retired : _retiredClients)
+            {
+                if (retired.client == client && !retired.disposed)
+                {
+                    retired.disposed = true;
+                    retired.disposedAt = now;
+                }
+            }
+            return;
+        }
+
+        ESP_LOGW(TAG, "Disconnected from Companion");
+        _client = nullptr;
+        _retiredClients.push_back({client, now, true, now});
+        resetRegistrations();
+        _txBuffer.clear();
+
+        if (_state != SatelliteConnectionState::REJECTED)
+        {
+            scheduleReconnect();
         }
     }
 
-    // CAN_CHANGE_PAGE is a label string for the checkbox Companion shows in the
-    // surface settings panel - its mere presence enables the feature, so only
-    // send it when a real label was provided (see SatelliteSurfaceConfig::canChangePageLabel).
-    if (config.canChangePageLabel.has_value() && config.canChangePageLabel->length() > 0)
+    if (_options.dispatch == SatelliteDispatchMode::IMMEDIATE)
     {
-        if (isSafeApiTokenValue(config.canChangePageLabel.value()))
+        drainQueue();
+    }
+}
+
+void Satellite::onClientData(AsyncClient *client, const char *data, size_t length)
+{
+    {
+        Lock lock(_mutex);
+        if (client != _client)
         {
-            addDeviceCommand += " CAN_CHANGE_PAGE=\"" + config.canChangePageLabel.value() + "\"";
+            return;
         }
-        else
-        {
-            ESP_LOGW("Satellite", "Invalid CAN_CHANGE_PAGE label (must not contain quotes/newlines), omitting field");
-        }
+        _lastRxMs = millis();
     }
 
-    // Pincode support
-    switch (config.pincodeSupport)
+    // _rxBuffer is only touched on the network task, so it needs no lock
+    bool stopped = false;
+    size_t dropped = _rxBuffer.push(data, length, [&](std::string &&line)
+                                    {
+                                        if (!stopped)
+                                        {
+                                            stopped = !handleLine(client, std::move(line));
+                                        } });
+    if (dropped > 0)
     {
-    case SatelliteSurfacePincodeSupport::PARTIAL:
-        addDeviceCommand += " PINCODE_LOCK=PARTIAL";
-        break;
-    case SatelliteSurfacePincodeSupport::FULL:
-        addDeviceCommand += " PINCODE_LOCK=FULL";
-        break;
-    default:
-        break;
+        ESP_LOGW(TAG, "Skipped a message longer than %u bytes - increase SatelliteOptions::maxLineLength, or request smaller bitmaps",
+                 static_cast<unsigned>(_rxBuffer.maxLineLength()));
     }
 
-    // Add variables. This should be a base64 encoded json array describing any input or output variables
-    // test if there are variables
-    if (!variables.empty())
+    if (_options.dispatch == SatelliteDispatchMode::IMMEDIATE)
     {
-        JsonDocument doc;
-        JsonArray array = doc.to<JsonArray>();
-        for (const auto &var : variables)
-        {
-            JsonObject varObj = array.add<JsonObject>();
-            varObj["id"] = var.id;
-            varObj["type"] = (var.type == SatelliteSurfaceVariableType::VARIABLE_INPUT) ? "input" : "output";
-            varObj["name"] = var.name;
-            varObj["description"] = var.description;
-        }
-        String jsonString;
-        jsonString.reserve(measureJson(doc));
-        serializeJson(doc, jsonString);
-        addDeviceCommand += " VARIABLES=" + base64::encode(jsonString);
+        drainQueue();
     }
-
-    if (config.configFieldsJson.has_value() && config.configFieldsJson->length() > 0)
-    {
-        JsonDocument configFieldsDoc;
-        DeserializationError cfgErr = deserializeJson(configFieldsDoc, config.configFieldsJson.value());
-        if (cfgErr)
-        {
-            ESP_LOGW("Satellite", "CONFIG_FIELDS is not valid JSON, omitting field: %s", cfgErr.c_str());
-        }
-        else if (!configFieldsDoc.is<JsonArray>())
-        {
-            ESP_LOGW("Satellite", "CONFIG_FIELDS must be a JSON array, omitting field");
-        }
-        else
-        {
-            addDeviceCommand += " CONFIG_FIELDS=\"" + base64::encode(config.configFieldsJson.value()) + "\"";
-        }
-    }
-
-    addDeviceCommand += "\n";
-    send(addDeviceCommand);
 }
 
 /**
- * @brief Add a surface to this satellite
- *
- * Registers a surface with this satellite and sends ADD-DEVICE command
- * to Companion if connected. Prevents duplicate surface IDs.
- *
- * @return True if successfully added, false if ID already exists
+ * Handle one received line, on the network task.
+ * @return false once the client is no longer current (eg. it was rejected), to stop processing
  */
+bool Satellite::handleLine(AsyncClient *client, std::string &&line)
+{
+    if (line.empty())
+    {
+        return true;
+    }
+
+    // Answer a PING with its payload echoed back verbatim, without parsing it
+    if (line.size() >= 4 && strncasecmp(line.c_str(), "PING", 4) == 0 && (line.size() == 4 || line[4] == ' '))
+    {
+        Lock lock(_mutex);
+        if (client != _client)
+        {
+            return false;
+        }
+        send("PONG" + line.substr(4) + "\n");
+        return true;
+    }
+
+    std::unique_ptr<Message> message(new (std::nothrow) Message(std::move(line)));
+    if (!message)
+    {
+        ESP_LOGE(TAG, "Out of memory parsing a message");
+        return true;
+    }
+
+    Lock lock(_mutex);
+    if (client != _client)
+    {
+        return false;
+    }
+
+    if (message->is("PONG"))
+    {
+        return true; // only proves liveness, which _lastRxMs already recorded
+    }
+    if (message->is("BEGIN"))
+    {
+        handleBegin(*message);
+        return client == _client;
+    }
+    if (message->is("CAPS"))
+    {
+        handleCaps(std::move(message));
+        return true;
+    }
+    if (message->isOk() || message->isError())
+    {
+        handleResponse(std::move(message));
+        return true;
+    }
+    if (message->is("ERROR"))
+    {
+        std::string text(message->params().get("MESSAGE").value_or("(no message)"));
+        ESP_LOGE(TAG, "Error from Companion: %s", text.c_str());
+        return true;
+    }
+
+    QueuedItem item;
+    if (message->is("SUB-STATE"))
+    {
+        std::optional<std::string_view> subId = message->params().get("SUBID");
+        if (!subId)
+        {
+            ESP_LOGW(TAG, "SUB-STATE without SUBID");
+            return true;
+        }
+        item.kind = TargetKind::SUBSCRIPTION;
+        item.target = std::string(*subId);
+        item.coalesceKey = "S";
+    }
+    else if (std::optional<std::string_view> deviceId = message->params().get("DEVICEID"))
+    {
+        item.kind = TargetKind::SURFACE;
+        item.target = std::string(*deviceId);
+        if (message->is("KEY-STATE"))
+        {
+            // Only the latest state of a key matters, so a newer one replaces a queued one
+            std::optional<std::string_view> control = message->params().get("CONTROLID");
+            if (!control)
+            {
+                control = message->params().get("KEY");
+            }
+            item.coalesceKey = "K" + std::string(control.value_or(""));
+        }
+    }
+    else
+    {
+        ESP_LOGW(TAG, "Unhandled message: %.*s", static_cast<int>(message->command().size()), message->command().data());
+        return true;
+    }
+
+    item.message = std::move(message);
+    enqueue(std::move(item));
+    return true;
+}
+
+void Satellite::handleBegin(const Message &message)
+{
+    _companionVersion = toString(message.params().get("CompanionVersion").value_or("unknown"));
+    _apiVersionText = toString(message.params().get("ApiVersion").value_or("unknown"));
+    _apiVersion = ApiVersion::parse(_apiVersionText.c_str());
+
+    if (!_apiVersion || !_apiVersion->atLeast(kMinimumApiVersion))
+    {
+        ESP_LOGE(TAG, "Companion Satellite API version '%s' is not supported (needs %u.%u.%u or later, ie. Companion 4.3+). Not reconnecting until the target changes",
+                 _apiVersionText.c_str(), kMinimumApiVersion.major, kMinimumApiVersion.minor, kMinimumApiVersion.patch);
+        _apiVersion.reset();
+        setState(SatelliteConnectionState::REJECTED);
+        retireClient();
+        return;
+    }
+
+    ESP_LOGI(TAG, "Connected to Companion %s, Satellite API %s", _companionVersion.c_str(), _apiVersionText.c_str());
+    // Surfaces are registered once CAPS has arrived, as the connection isn't ready until then
+}
+
+void Satellite::handleCaps(std::unique_ptr<Message> message)
+{
+    if (!_apiVersion)
+    {
+        ESP_LOGW(TAG, "CAPS received before BEGIN, ignoring");
+        return;
+    }
+
+    _capsBitmapFormats.clear();
+    std::string_view formats = message->params().get("BITMAP_FORMATS").value_or("");
+    while (!formats.empty())
+    {
+        size_t comma = formats.find(',');
+        std::string_view format = formats.substr(0, comma);
+        if (!format.empty())
+        {
+            _capsBitmapFormats.push_back(toString(format));
+        }
+        formats = comma == std::string_view::npos ? std::string_view{} : formats.substr(comma + 1);
+    }
+
+    _caps = std::move(message);
+    _reconnectDelayMs = kInitialReconnectDelayMs;
+
+    ESP_LOGI(TAG, "Companion capabilities: subscriptions=%d nonsquare=%d rotaryAmount=%d bitmapFormats=%u",
+             hasFeature(SatelliteFeature::Subscriptions), hasFeature(SatelliteFeature::NonSquareBitmaps),
+             hasFeature(SatelliteFeature::RotaryAmount), static_cast<unsigned>(_capsBitmapFormats.size()));
+
+    setState(SatelliteConnectionState::READY);
+    registerAll();
+}
+
+void Satellite::registerAll()
+{
+    for (SatelliteSurface *surface : _surfaces)
+    {
+        send(surface->buildAddDeviceCommand());
+    }
+
+    if (_subscriptions.empty())
+    {
+        return;
+    }
+    if (!hasFeature(SatelliteFeature::Subscriptions))
+    {
+        ESP_LOGW(TAG, "Button subscriptions are disabled in Companion's settings - %u subscription(s) not registered",
+                 static_cast<unsigned>(_subscriptions.size()));
+        return;
+    }
+    for (SatelliteSubscription *subscription : _subscriptions)
+    {
+        sendAddSubscription(*subscription);
+    }
+}
+
+/**
+ * Handle a response (`<COMMAND> OK|ERROR ...`) to something we sent.
+ */
+void Satellite::handleResponse(std::unique_ptr<Message> message)
+{
+    const satellite_protocol::Params &params = message->params();
+    bool ok = message->isOk();
+    std::string command(message->command());
+    std::string errorText(params.get("MESSAGE").value_or(""));
+
+    if (message->is("ADD-SUB"))
+    {
+        // Companion's ADD-SUB errors don't carry the SUBID, but it answers in order, so the
+        // response belongs to the oldest ADD-SUB still waiting for one.
+        String subId;
+        if (!_pendingAddSubs.empty())
+        {
+            subId = _pendingAddSubs.front();
+            _pendingAddSubs.pop_front();
+        }
+        if (std::optional<std::string_view> echoed = params.get("SUBID"))
+        {
+            subId = toString(*echoed);
+        }
+
+        if (!ok)
+        {
+            ESP_LOGW(TAG, "Companion rejected subscription %s: %s", subId.c_str(), errorText.c_str());
+        }
+
+        for (SatelliteSubscription *subscription : _subscriptions)
+        {
+            if (subscription->_subId == subId)
+            {
+                subscription->_active = ok;
+                QueuedItem item;
+                item.kind = TargetKind::SUBSCRIPTION;
+                item.target = subId.c_str();
+                item.message = std::move(message);
+                enqueue(std::move(item));
+                break;
+            }
+        }
+        return;
+    }
+
+    std::optional<std::string_view> deviceId = params.get("DEVICEID");
+    if (!ok)
+    {
+        ESP_LOGW(TAG, "Companion rejected %s%s%.*s: %s", command.c_str(), deviceId ? " for " : "",
+                 deviceId ? static_cast<int>(deviceId->size()) : 0, deviceId ? deviceId->data() : "", errorText.c_str());
+    }
+
+    if (!deviceId)
+    {
+        return;
+    }
+
+    bool isAddDevice = message->is("ADD-DEVICE");
+    if (isAddDevice)
+    {
+        for (SatelliteSurface *surface : _surfaces)
+        {
+            if (std::string_view(surface->getID().c_str()) == *deviceId)
+            {
+                surface->_registered = ok;
+            }
+        }
+    }
+
+    // The surface hears about its registration, and about any errors
+    if (isAddDevice || !ok)
+    {
+        QueuedItem item;
+        item.kind = TargetKind::SURFACE;
+        item.target = std::string(*deviceId);
+        item.message = std::move(message);
+        enqueue(std::move(item));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sending
+// ---------------------------------------------------------------------------
+
+bool Satellite::send(std::string &&line)
+{
+    Lock lock(_mutex);
+    if (line.empty())
+    {
+        return false; // a MessageBuilder that rejected its input
+    }
+    if (!_client || (_state != SatelliteConnectionState::NEGOTIATING && _state != SatelliteConnectionState::READY))
+    {
+        ESP_LOGD(TAG, "Not connected, dropping: %s", line.c_str());
+        return false;
+    }
+    if (_txBuffer.size() + line.size() > kMaxTxBufferBytes)
+    {
+        ESP_LOGW(TAG, "Send buffer full, dropping: %.*s", static_cast<int>(std::min<size_t>(line.find(' '), 32)), line.c_str());
+        return false;
+    }
+
+    ESP_LOGV(TAG, "Sending: %s", line.c_str());
+    _txBuffer.append(line);
+    flushTx();
+    return true;
+}
+
+/**
+ * Hand as much of the send buffer to the TCP stack as it has room for. Whatever doesn't
+ * fit stays buffered (in order) until onAck or the next tick, so a long message or a
+ * burst of them is never cut off part way through a line.
+ */
+void Satellite::flushTx()
+{
+    if (!_client || _txBuffer.empty())
+    {
+        return;
+    }
+
+    size_t queued = 0;
+    while (queued < _txBuffer.size())
+    {
+        size_t added = _client->add(_txBuffer.data() + queued, _txBuffer.size() - queued);
+        if (added == 0)
+        {
+            break;
+        }
+        queued += added;
+    }
+
+    if (queued > 0)
+    {
+        _client->send();
+        _txBuffer.erase(0, queued);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+void Satellite::enqueue(QueuedItem &&item)
+{
+    item.bytes = sizeof(QueuedItem) + item.target.capacity() + item.coalesceKey.capacity() + (item.message ? item.message->memoryUsage() : 0);
+
+    if (!item.coalesceKey.empty())
+    {
+        // Replace a queued update for the same key, unless something else for the same
+        // target (eg. KEYS-CLEAR) has been queued since, which must stay in order.
+        for (auto it = _queue.rbegin(); it != _queue.rend(); ++it)
+        {
+            if (it->kind != item.kind || it->target != item.target)
+            {
+                continue;
+            }
+            if (it->coalesceKey.empty())
+            {
+                break;
+            }
+            if (it->coalesceKey == item.coalesceKey)
+            {
+                _queuedBytes = _queuedBytes - it->bytes + item.bytes;
+                *it = std::move(item);
+                return;
+            }
+        }
+    }
+
+    if (item.kind != TargetKind::CONNECTION && _queuedBytes + item.bytes > _options.maxQueuedBytes)
+    {
+        _droppedUpdates++;
+        if (_droppedUpdates == 1 || _droppedUpdates % 100 == 0)
+        {
+            ESP_LOGW(TAG, "Receive queue full (%u bytes), dropped %u update(s) - call loop() more often or raise SatelliteOptions::maxQueuedBytes",
+                     static_cast<unsigned>(_queuedBytes), static_cast<unsigned>(_droppedUpdates));
+        }
+        return;
+    }
+
+    _queuedBytes += item.bytes;
+    _queue.push_back(std::move(item));
+}
+
+void Satellite::purgeQueue(TargetKind kind, const String &target)
+{
+    for (auto it = _queue.begin(); it != _queue.end();)
+    {
+        if (it->kind == kind && it->target == target.c_str())
+        {
+            _queuedBytes -= it->bytes;
+            it = _queue.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+void Satellite::drainQueue()
+{
+    Lock dispatchLock(_dispatchMutex);
+
+    size_t pending;
+    {
+        Lock lock(_mutex);
+        _lastLoopMs = millis();
+        _loopWarningLogged = false;
+        pending = _queue.size();
+    }
+
+    // Only run what was queued on entry, so a busy connection can't keep us here forever
+    while (pending-- > 0)
+    {
+        QueuedItem item;
+        {
+            Lock lock(_mutex);
+            if (_queue.empty())
+            {
+                break;
+            }
+            item = std::move(_queue.front());
+            _queue.pop_front();
+            _queuedBytes -= item.bytes;
+        }
+        dispatch(item);
+    }
+}
+
+void Satellite::dispatch(QueuedItem &item)
+{
+    switch (item.kind)
+    {
+    case TargetKind::CONNECTION:
+        if (_onConnectionStateChange)
+        {
+            _onConnectionStateChange(item.state);
+        }
+        break;
+    case TargetKind::SURFACE:
+        dispatchToSurface(item.target, *item.message);
+        break;
+    case TargetKind::SUBSCRIPTION:
+        dispatchToSubscription(item.target, *item.message);
+        break;
+    }
+}
+
+void Satellite::dispatchToSurface(const std::string &deviceId, const Message &message)
+{
+    SatelliteSurface *target = nullptr;
+    {
+        Lock lock(_mutex);
+        for (SatelliteSurface *surface : _surfaces)
+        {
+            if (deviceId == surface->getID().c_str())
+            {
+                target = surface;
+                break;
+            }
+        }
+    }
+
+    if (target)
+    {
+        target->handleMessage(message);
+    }
+    else
+    {
+        ESP_LOGD(TAG, "Message for unknown device %s", deviceId.c_str());
+    }
+}
+
+void Satellite::dispatchToSubscription(const std::string &subId, const Message &message)
+{
+    SatelliteSubscription *target = nullptr;
+    {
+        Lock lock(_mutex);
+        for (SatelliteSubscription *subscription : _subscriptions)
+        {
+            if (subId == subscription->_subId.c_str())
+            {
+                target = subscription;
+                break;
+            }
+        }
+    }
+
+    if (target)
+    {
+        target->handleMessage(message);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Surfaces and subscriptions
+// ---------------------------------------------------------------------------
+
 bool Satellite::add(SatelliteSurface &surface)
 {
-    xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-
-    // check if ID exists
-    for (const auto &existingSurface : _surfaces)
+    Lock lock(_mutex);
+    for (SatelliteSurface *existing : _surfaces)
     {
-        if (existingSurface->getID() == surface.getID())
+        if (existing->getID() == surface.getID())
         {
-            ESP_LOGE("Satellite", "Surface with ID %s already exists", surface.getID().c_str());
-            xSemaphoreGiveRecursive(_mutex);
+            ESP_LOGE(TAG, "Surface with ID %s already exists", surface.getID().c_str());
             return false;
         }
     }
 
     _surfaces.push_back(&surface);
-    bool readyForAdd = _client && _client->connected() && _apiNegotiated;
-
-    xSemaphoreGiveRecursive(_mutex);
-
-    if (readyForAdd)
+    if (_state == SatelliteConnectionState::READY)
     {
-        sendAddCommand(surface);
+        send(surface.buildAddDeviceCommand());
     }
-    else
-    {
-        ESP_LOGW("Satellite", "Surface queued until Companion connection and API negotiation complete");
-    }
-
     return true;
 }
 
-/**
- * @brief Remove a surface from this satellite
- *
- * Sends REMOVE-DEVICE command to Companion and removes the surface
- * from the internal list.
- */
 void Satellite::remove(SatelliteSurface &surface)
 {
-    send("REMOVE-DEVICE DEVICEID=" + surface.getID() + "\n");
-    xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+    Lock lock(_mutex);
+    if (surface._registered)
+    {
+        send(satellite_protocol::MessageBuilder("REMOVE-DEVICE").deviceId(surface.getID().c_str()).finish());
+        surface._registered = false;
+    }
     _surfaces.remove(&surface);
-    xSemaphoreGiveRecursive(_mutex);
+    purgeQueue(TargetKind::SURFACE, surface.getID());
 }
 
-/**
- * @brief Append a BITMAP_FORMAT="..." parameter if valid and advertised by CAPS
- *
- * Shared by ADD-DEVICE (sendAddCommand) and ADD-SUB (addSubscription). Omits
- * the parameter (rather than aborting the whole command) when the value is
- * unsafe or wasn't advertised, matching the protocol's documented fallback to
- * "rgb" for an omitted/unrecognized BITMAP_FORMAT.
- */
-void Satellite::appendBitmapFormatParam(String &command, const char *commandName, const String &requestedFormat) const
+void Satellite::add(SatelliteSubscription &subscription)
 {
-    if (!isSafeApiTokenValue(requestedFormat))
+    Lock lock(_mutex);
+    _subscriptions.push_back(&subscription);
+    if (_state == SatelliteConnectionState::READY)
     {
-        ESP_LOGW("Satellite", "Invalid %s BITMAP_FORMAT value, omitting parameter", commandName);
-        return;
-    }
-
-    xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-    bool formatAdvertised = _capsBitmapFormats.empty() ||
-                            std::find(_capsBitmapFormats.begin(), _capsBitmapFormats.end(), requestedFormat) != _capsBitmapFormats.end();
-    xSemaphoreGiveRecursive(_mutex);
-
-    if (!formatAdvertised)
-    {
-        ESP_LOGW("Satellite", "%s BITMAP_FORMAT '%s' not advertised by server CAPS, omitting parameter", commandName, requestedFormat.c_str());
-        return;
-    }
-
-    command += " BITMAP_FORMAT=\"" + requestedFormat + "\"";
-}
-
-/**
- * @brief Log a warning if a requested square bitmap size likely won't fit in MAX_RX_BUFFER_SIZE
- *
- * Shared by ADD-DEVICE (sendAddCommand) and ADD-SUB (addSubscription). Advisory
- * only - it doesn't stop the request from being sent.
- */
-void Satellite::warnIfBitmapSizeTooLarge(const char *commandName, uint16_t bitmapSize) const
-{
-    if (bitmapSize == 0)
-    {
-        return;
-    }
-
-    // Raw 8-bit RGB is 3 bytes/pixel; base64 encoding inflates that to ceil(raw/3)*4 bytes.
-    size_t rawBytes = static_cast<size_t>(bitmapSize) * bitmapSize * 3;
-    size_t base64Bytes = ((rawBytes + 2) / 3) * 4;
-    constexpr size_t kOverheadBytes = 256; // room for the surrounding KEY-STATE/SUB-STATE fields
-
-    if (base64Bytes + kOverheadBytes > MAX_RX_BUFFER_SIZE)
-    {
-        ESP_LOGW("Satellite", "%s bitmap size %u needs ~%u bytes but MAX_RX_BUFFER_SIZE is %u - increase MAX_RX_BUFFER_SIZE in companion-satellite.hpp or the bitmap will be dropped",
-                 commandName, bitmapSize, static_cast<unsigned>(base64Bytes + kOverheadBytes), static_cast<unsigned>(MAX_RX_BUFFER_SIZE));
-    }
-}
-
-/**
- * @brief Parse all KEY=VALUE tokens out of a Satellite API message line in a single pass
- *
- * Replaces repeatedly re-scanning the (potentially large, eg. bitmap-carrying)
- * message string once per field: callers tokenize a line once and then look
- * up as many fields as they need via findApiParam.
- */
-std::vector<Satellite::ApiParam> Satellite::tokenizeApiParams(const String &data) const
-{
-    std::vector<ApiParam> tokens;
-    const int n = data.length();
-    int pos = 0;
-
-    while (pos < n)
-    {
-        while (pos < n && isTokenBoundary(data.charAt(pos)))
+        if (hasFeature(SatelliteFeature::Subscriptions))
         {
-            pos++;
-        }
-        if (pos >= n)
-        {
-            break;
-        }
-
-        int idStart = pos;
-        while (pos < n && data.charAt(pos) != '=' && !isTokenBoundary(data.charAt(pos)))
-        {
-            pos++;
-        }
-
-        if (pos >= n || data.charAt(pos) != '=')
-        {
-            // Bare word with no '=' (eg. the leading command name) - skip it.
-            while (pos < n && !isTokenBoundary(data.charAt(pos)))
-            {
-                pos++;
-            }
-            continue;
-        }
-
-        String id = data.substring(idStart, pos);
-        pos++; // skip '='
-
-        String value;
-        if (pos < n && data.charAt(pos) == '"')
-        {
-            pos++;
-            int valueStart = pos;
-            while (pos < n && data.charAt(pos) != '"')
-            {
-                pos++;
-            }
-            value = data.substring(valueStart, pos);
-            if (pos < n)
-            {
-                pos++; // skip closing quote
-            }
+            sendAddSubscription(subscription);
         }
         else
         {
-            int valueStart = pos;
-            while (pos < n && !isTokenBoundary(data.charAt(pos)))
-            {
-                pos++;
-            }
-            value = data.substring(valueStart, pos);
+            ESP_LOGW(TAG, "Button subscriptions are disabled in Companion's settings - %s not registered", subscription._subId.c_str());
         }
-
-        ApiParam param;
-        param.id = id;
-        param.val = value;
-        tokens.push_back(param);
     }
-
-    return tokens;
 }
 
-/**
- * @brief Look up a single field by name within a previously tokenized message
- *
- * Supports optional base64 decoding of just the matched value.
- */
-Satellite::ApiParam Satellite::findApiParam(const std::vector<ApiParam> &tokens, const char *id, bool decodeBase64) const
+void Satellite::remove(SatelliteSubscription &subscription)
 {
-    ApiParam result;
-    for (const auto &token : tokens)
+    Lock lock(_mutex);
+    // Also remove one whose ADD-SUB hasn't been answered yet, as it may still succeed
+    bool pending = std::find(_pendingAddSubs.begin(), _pendingAddSubs.end(), subscription._subId) != _pendingAddSubs.end();
+    if (subscription._active || pending)
     {
-        if (token.id.has_value() && token.id.value() == id)
-        {
-            result = token;
-            break;
-        }
+        send(satellite_protocol::MessageBuilder("REMOVE-SUB").str("SUBID", subscription._subId.c_str()).finish());
+        subscription._active = false;
     }
-
-    if (decodeBase64 && result.val.has_value())
-    {
-        const String &value = result.val.value();
-        size_t outputLen = 0;
-        int decodeSizeResult = mbedtls_base64_decode(nullptr, 0, &outputLen, (const unsigned char *)value.c_str(), value.length());
-        if ((decodeSizeResult == 0 || decodeSizeResult == MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL) && outputLen > 0)
-        {
-            uint8_t *decodedBuffer = new uint8_t[outputLen + 1];
-            size_t decodedLength = 0;
-            int decodeResult = mbedtls_base64_decode(decodedBuffer, outputLen, &decodedLength, (const unsigned char *)value.c_str(), value.length());
-            if (decodeResult == 0)
-            {
-                decodedBuffer[decodedLength] = '\0';
-                result.val = String((char *)decodedBuffer, decodedLength);
-            }
-            delete[] decodedBuffer;
-        }
-    }
-
-    return result;
+    _subscriptions.remove(&subscription);
+    purgeQueue(TargetKind::SUBSCRIPTION, subscription._subId);
 }
 
-/**
- * @brief Compare negotiated ApiVersion to a minimum version requirement
- */
-bool Satellite::isApiVersionAtLeast(uint16_t major, uint16_t minor, uint16_t patch) const
+void Satellite::sendAddSubscription(SatelliteSubscription &subscription)
 {
-    xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-    bool valid = _satelliteApiVersionValid;
-    uint16_t apiMajor = _satelliteApiMajor;
-    uint16_t apiMinor = _satelliteApiMinor;
-    uint16_t apiPatch = _satelliteApiPatch;
-    xSemaphoreGiveRecursive(_mutex);
-
-    if (!valid)
+    if (send(subscription.buildAddCommand()))
     {
-        return false;
+        _pendingAddSubs.push_back(subscription._subId);
     }
-
-    return isVersionAtLeast(apiMajor, apiMinor, apiPatch, major, minor, patch);
 }

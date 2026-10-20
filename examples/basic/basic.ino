@@ -108,8 +108,10 @@ void setup()
                                 strip.show(); });
 }
 
-// Button handling happens in buttonTask, so the loop task isn't needed.
 void loop()
 {
-  vTaskDelete(NULL);
+  // Runs the callbacks above (key state, brightness) here on the loop task,
+  // rather than on the network task.
+  satellite.loop();
+  delay(5);
 }

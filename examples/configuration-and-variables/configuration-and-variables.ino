@@ -115,12 +115,15 @@ void setup()
                             });
 
   // Companion -> device: fires whenever a value is pushed to an output variable.
-  surface.setOnVariableSet([](String id, String value)
+  surface.setOnVariableSet([](const String &id, const String &value)
                            { Serial.printf("onVariableSet: %s = %s\n", id.c_str(), value.c_str()); });
 }
 
 void loop()
 {
+  // Runs the callbacks registered in setup()
+  satellite.loop();
+
   // Device -> Companion: push the input variable on the interval configured
   // via the report_interval_seconds config field (default 10s until
   // Companion sends its DEVICE-CONFIG).
