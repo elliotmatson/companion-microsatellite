@@ -20,6 +20,7 @@
 // - ArduinoJson
 // - TFT_eSPI (Bodmer)
 // - XPT2046_Touchscreen (Paul Stoffregen), 1.4 or later
+// - PNGdec (Larry Bank), 1.1 or later
 //
 // TFT_eSPI setup: TFT_eSPI takes its display settings from the User_Setup.h
 // in its own library folder, and those settings have to be the same for the
@@ -42,6 +43,7 @@
 #error "TFT_eSPI isn't configured for the CYD - install User_Setup_CYD.h as described at the top of cyd.ino"
 #endif
 
+#include <PNGdec.h>
 #include <Preferences.h>
 #include <XPT2046_Touchscreen.h>
 #include <WiFi.h>
@@ -95,14 +97,18 @@ constexpr int16_t kCellWidth = kScreenWidth / kGridColumns;
 constexpr int16_t kCellHeight = kScreenHeight / kGridRows;
 
 // Requested square bitmap size, matching the cell size exactly so each
-// button image fills its cell. Sent as raw 8-bit RGB, 3 bytes per pixel,
-// base64-encoded - kCellWidth/kCellHeight are both 80px here, so each
-// KEY-STATE line is ~26KB.
+// button image fills its cell (kCellWidth/kCellHeight are both 80px here).
+// Bitmaps are requested as PNG: a typical button is 1-6KB instead of the
+// 19.2KB of raw 8-bit RGB, so a page of 12 is several times less to send.
+// A Companion whose Satellite API is older than 1.12 can't send PNG and sends
+// raw RGB, which is drawn too.
 constexpr uint16_t kBitmapSize = 80;
+constexpr size_t kRawBitmapLength = (size_t)kBitmapSize * kBitmapSize * 3;
 
-// The longest KEY-STATE line to expect: the base64 bitmap (4 characters per
-// 3 bytes) plus 1KB for the rest of the message.
-constexpr size_t kMaxLineLength = ((size_t)kBitmapSize * kBitmapSize * 3 + 2) / 3 * 4 + 1024;
+// The longest KEY-STATE line to expect: a raw RGB bitmap in base64 (4
+// characters per 3 bytes) plus 1KB for the rest of the message. PNG lines are
+// smaller.
+constexpr size_t kMaxLineLength = (kRawBitmapLength + 2) / 3 * 4 + 1024;
 
 TFT_eSPI tft = TFT_eSPI();
 SPIClass touchscreenSPI = SPIClass(VSPI);
@@ -115,6 +121,7 @@ SatelliteSurfaceConfig surfaceConfig = {
     .keysPerRow = kGridColumns,
     .sendColors = true,
     .bitmapSize = kBitmapSize,
+    .bitmapFormat = "png",
 };
 
 SatelliteSurface surface(satellite, "CYD Surface", surfaceConfig);
@@ -142,43 +149,99 @@ void drawCellColor(uint8_t index, uint16_t fillColor)
   tft.drawRect(x, y, w, h, TFT_DARKGREY);
 }
 
-// Decode a raw-RGB bitmap from Companion and blit it into a key's cell.
-// The bitmap data is only valid during the key state callback, so this is
-// called from inside it (which runs in satellite.loop(), on the loop task -
-// the same task that reads the touchscreen, so the two never share SPI
-// concurrently).
-void drawCellBitmap(uint8_t index, const SatelliteEncodedData &bitmap)
+// One buffer for decoding bitmaps, static rather than allocated per key: no
+// heap churn while a page of images streams in, and nothing to run out of
+// (on builds without C++ exceptions, a failed new aborts even with nothrow).
+// It holds a raw RGB bitmap, or a PNG file - which for a button image is far
+// smaller than the raw pixels.
+uint16_t bitmapBuffer[(kRawBitmapLength + 1) / 2];
+
+// The PNG decoder. It's ~44KB (mostly zlib's 32KB window), so there's just
+// the one, kept for good rather than allocated per image.
+PNG png;
+
+// Where the PNG being decoded goes on screen, for pngDrawRow().
+struct PngTarget
 {
-  constexpr size_t kRawLength = (size_t)kBitmapSize * kBitmapSize * 3;
-  if (bitmap.isDataUrl() || bitmap.decodedLength() != kRawLength)
+  int16_t x;
+  int16_t y;
+};
+
+// PNGdec hands over the image a row at a time: convert it and push it out.
+int pngDrawRow(PNGDRAW *draw)
+{
+  const PngTarget *target = static_cast<const PngTarget *>(draw->pUser);
+  uint16_t row[kBitmapSize];
+  // Little-endian, like drawRawBitmap()'s pixels: setSwapBytes(true) fixes up the order
+  png.getLineAsRGB565(draw, row, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
+  tft.pushImage(target->x, target->y + draw->y, draw->iWidth, 1, row);
+  return 1;
+}
+
+// Decode a PNG bitmap from Companion straight onto the screen.
+bool drawPngBitmap(int16_t x, int16_t y, const SatelliteEncodedData &bitmap)
+{
+  if (bitmap.mimeType() != "image/png")
   {
-    // Not the raw RGB size we expect (eg. a png/webp data URL) - skip it.
-    return;
+    return false;
+  }
+  uint8_t *file = reinterpret_cast<uint8_t *>(bitmapBuffer);
+  size_t length = bitmap.decode(file, sizeof(bitmapBuffer));
+  if (length == 0 || png.openRAM(file, length, pngDrawRow) != PNG_SUCCESS)
+  {
+    return false;
+  }
+  bool fits = png.getWidth() <= kBitmapSize && png.getHeight() <= kBitmapSize;
+  if (fits)
+  {
+    PngTarget target{x, y};
+    tft.startWrite(); // one SPI transaction for all the rows
+    png.decode(&target, 0);
+    tft.endWrite();
+  }
+  png.close();
+  return fits;
+}
+
+// Decode a raw RGB bitmap from Companion and draw it.
+bool drawRawBitmap(int16_t x, int16_t y, const SatelliteEncodedData &bitmap)
+{
+  if (bitmap.isDataUrl() || bitmap.decodedLength() != kRawBitmapLength)
+  {
+    return false;
   }
 
   // Decode and convert in one buffer: each 3-byte RGB888 pixel shrinks to a
   // 2-byte RGB565 one, so converting front to back never overwrites input
-  // that hasn't been read yet. It's static rather than allocated per key: no
-  // heap churn while a page of images streams in, and nothing to run out of
-  // (on builds without C++ exceptions, a failed new aborts even with nothrow).
+  // that hasn't been read yet.
   constexpr size_t kPixels = (size_t)kBitmapSize * kBitmapSize;
-  static uint16_t rgb565[(kRawLength + 1) / 2];
-  uint8_t *rgb888 = reinterpret_cast<uint8_t *>(rgb565);
-  if (bitmap.decode(rgb888, kRawLength) != kRawLength)
+  uint8_t *rgb888 = reinterpret_cast<uint8_t *>(bitmapBuffer);
+  if (bitmap.decode(rgb888, kRawBitmapLength) != kRawBitmapLength)
   {
-    return;
+    return false;
   }
-
   for (size_t i = 0; i < kPixels; i++)
   {
     uint8_t r = rgb888[i * 3], g = rgb888[i * 3 + 1], b = rgb888[i * 3 + 2];
-    rgb565[i] = tft.color565(r, g, b);
+    bitmapBuffer[i] = tft.color565(r, g, b);
   }
+  tft.pushImage(x, y, kBitmapSize, kBitmapSize, bitmapBuffer);
+  return true;
+}
 
+// Draw the bitmap Companion sent for a key into its cell. The bitmap data is
+// only valid during the key state callback, so this is called from inside it
+// (which runs in satellite.loop(), on the loop task - the same task that reads
+// the touchscreen, so the two never share SPI concurrently).
+void drawCellBitmap(uint8_t index, const SatelliteEncodedData &bitmap)
+{
   int16_t x, y, w, h;
   cellRect(index, x, y, w, h);
-  tft.pushImage(x + (w - kBitmapSize) / 2, y + (h - kBitmapSize) / 2, kBitmapSize, kBitmapSize, rgb565);
-
+  int16_t imageX = x + (w - kBitmapSize) / 2, imageY = y + (h - kBitmapSize) / 2;
+  if (!drawPngBitmap(imageX, imageY, bitmap) && !drawRawBitmap(imageX, imageY, bitmap))
+  {
+    return; // not something we can draw (eg. the wrong size) - leave the cell as it was
+  }
   tft.drawRect(x, y, w, h, TFT_DARKGREY);
 }
 
@@ -313,8 +376,8 @@ void setup()
 
   tft.init();
   tft.setRotation(1); // landscape; try 3 if the display looks upside down
-  // drawCellBitmap() builds its RGB565 pixels as native (little-endian)
-  // uint16_t values; pushImage() sends them high byte first unless told to swap.
+  // Bitmaps are drawn from native (little-endian) RGB565 uint16_t values;
+  // pushImage() sends them high byte first unless told to swap.
   tft.setSwapBytes(true);
   tft.fillScreen(TFT_BLACK);
 
