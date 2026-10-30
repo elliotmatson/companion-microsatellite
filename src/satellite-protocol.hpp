@@ -15,6 +15,7 @@
 #ifndef COMPANION_SATELLITE_PROTOCOL_HPP
 #define COMPANION_SATELLITE_PROTOCOL_HPP
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -210,12 +211,33 @@ public:
     void setMaxLineLength(size_t maxLineLength) { _maxLineLength = maxLineLength; }
     size_t maxLineLength() const { return _maxLineLength; }
 
+    /** @brief Returns whether a buffer of this many bytes can be allocated right now */
+    using AllocationCheck = bool (*)(size_t bytes);
+
+    /**
+     * @brief Check before growing the buffer, and skip the line instead if it says no
+     *
+     * Without exceptions (as on the ESP32) a failed allocation aborts, so a burst of large
+     * lines arriving faster than they're handled would otherwise take the whole device down.
+     */
+    void setAllocationCheck(AllocationCheck check) { _canAllocate = check; }
+
+    /** @brief How many of the lines push() has dropped were for lack of memory, resetting the count */
+    size_t takeOutOfMemoryDrops()
+    {
+        size_t drops = _outOfMemoryDrops;
+        _outOfMemoryDrops = 0;
+        return drops;
+    }
+
 private:
     static constexpr size_t kSmallLine = 256;
 
     size_t _maxLineLength;
     std::string _buffer;
     bool _discarding = false;
+    AllocationCheck _canAllocate = nullptr;
+    size_t _outOfMemoryDrops = 0;
 };
 
 template <typename F>
@@ -250,6 +272,29 @@ size_t LineBuffer::push(const char *data, size_t length, F &&onLine)
             continue;
         }
 
+        size_t needed = _buffer.size() + (end - pos);
+        if (needed > _buffer.capacity())
+        {
+            // Grow in steps of our choosing - doubling, but never past the line limit - and
+            // only when the memory is there to grow into (+ 1 for the terminator)
+            size_t grown = std::min(std::max(needed, _buffer.capacity() * 2), _maxLineLength);
+            if (_canAllocate && !_canAllocate(grown + 1))
+            {
+                _buffer.clear();
+                _buffer.shrink_to_fit();
+                dropped++;
+                _outOfMemoryDrops++;
+                _discarding = !found;
+                pos = found ? end + 1 : length;
+                continue;
+            }
+            // Not _buffer.reserve(grown): libstdc++ rounds that up to twice the old capacity,
+            // more than was checked. A fresh string reserves exactly what's asked.
+            std::string bigger;
+            bigger.reserve(grown);
+            bigger.append(_buffer);
+            _buffer.swap(bigger);
+        }
         _buffer.append(data + pos, end - pos);
         if (!found)
         {

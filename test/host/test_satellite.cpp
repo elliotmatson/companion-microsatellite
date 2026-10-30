@@ -812,6 +812,44 @@ static void testConfigApi()
     CHECK(satellite.getTargetHostname() == "other-host" && satellite.getTargetPort() == 4321, "rejected POSTs leave the target alone");
 }
 
+// A large message that can't be buffered for lack of heap is skipped, and the session carries on
+// (on a CYD, a burst of 26KB KEY-STATE bitmaps aborted the device from inside the line buffer).
+static void testReceiveOutOfMemory()
+{
+    currentTest = "receive-out-of-memory";
+    Satellite satellite("test-oom");
+    SatelliteSurfaceConfig config;
+    config.totalKeys = 4;
+    SatelliteSurface surface(satellite, "Keys", config);
+    satellite.setTarget("c", 16622);
+    SatelliteOptions options = testOptions();
+    options.maxLineLength = 65536; // so only the memory check can skip the big line
+    satellite.begin(options);
+    AsyncClient *client = connectReady(satellite);
+    ackDeviceAdds(client, takeLines(client));
+    satellite.loop();
+    std::string id = surface.getID().c_str();
+
+    std::vector<uint16_t> seen;
+    surface.setOnKeyStateChange([&](const SatelliteControlState &state)
+                                { seen.push_back(state.index); });
+
+    satellite._rxBuffer.setAllocationCheck([](size_t bytes)
+                                           { return bytes <= 4096; });
+    std::string bigBitmap(20000, 'A');
+    client->simulateData("KEY-STATE DEVICEID=\"" + id + "\" KEY=1 BITMAP=\"" + bigBitmap + "\"\n");
+    client->simulateData("KEY-STATE DEVICEID=\"" + id + "\" KEY=2 TEXT=\"MQ==\"\n");
+    satellite.loop();
+    CHECK(satellite.getConnectionState() == SatelliteConnectionState::READY, "still connected after the skipped message");
+    CHECK(seen.size() == 1 && seen[0] == 2, "big update skipped, small one delivered (%zu)", seen.size());
+
+    satellite._rxBuffer.setAllocationCheck(nullptr);
+    seen.clear();
+    client->simulateData("KEY-STATE DEVICEID=\"" + id + "\" KEY=1 BITMAP=\"" + bigBitmap + "\"\n");
+    satellite.loop();
+    CHECK(seen.size() == 1 && seen[0] == 1, "big updates get through once memory is back");
+}
+
 int main(int argc, char **argv)
 {
     g_mockVerbose = argc > 1 && std::string(argv[1]) == "-v";
@@ -831,6 +869,7 @@ int main(int argc, char **argv)
     testQueueBound();
     testSavedTarget();
     testConfigApi();
+    testReceiveOutOfMemory();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

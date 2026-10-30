@@ -34,6 +34,19 @@ static constexpr uint32_t kLoopWarningMs = 5000;
 /** Most outgoing data to hold while waiting for TCP send buffer space */
 static constexpr size_t kMaxTxBufferBytes = 16384;
 
+#ifdef ESP_PLATFORM
+#include <esp_heap_caps.h>
+
+/** Heap to leave free for WiFi, lwIP and the application when buffering a received line */
+static constexpr size_t kReceiveHeapHeadroomBytes = 16384;
+
+static bool canAllocateReceiveBuffer(size_t bytes)
+{
+    return heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT) >= bytes &&
+           heap_caps_get_free_size(MALLOC_CAP_DEFAULT) >= bytes + kReceiveHeapHeadroomBytes;
+}
+#endif
+
 const char *satelliteConnectionStateName(SatelliteConnectionState state)
 {
     switch (state)
@@ -209,6 +222,9 @@ void Satellite::begin(const SatelliteOptions &options)
         _begun = true;
         _options = options;
         _rxBuffer.setMaxLineLength(options.maxLineLength);
+#ifdef ESP_PLATFORM
+        _rxBuffer.setAllocationCheck(canAllocateReceiveBuffer);
+#endif
         _lastLoopMs = millis();
     }
 
@@ -751,7 +767,13 @@ void Satellite::onClientData(AsyncClient *client, const char *data, size_t lengt
                                         {
                                             stopped = !handleLine(client, std::move(line));
                                         } });
-    if (dropped > 0)
+    size_t outOfMemory = _rxBuffer.takeOutOfMemoryDrops();
+    if (outOfMemory > 0)
+    {
+        ESP_LOGW(TAG, "Skipped %u message(s): not enough free heap to receive them - call loop() more often, lower SatelliteOptions::maxQueuedBytes, or request smaller bitmaps",
+                 static_cast<unsigned>(outOfMemory));
+    }
+    if (dropped > outOfMemory)
     {
         ESP_LOGW(TAG, "Skipped a message longer than %u bytes - increase SatelliteOptions::maxLineLength, or request smaller bitmaps",
                  static_cast<unsigned>(_rxBuffer.maxLineLength()));

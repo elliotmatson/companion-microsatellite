@@ -241,6 +241,52 @@ static void testLineBuffer()
     lines.clear();
     big.push(bitmapLine.data(), bitmapLine.size(), collect);
     CHECK(lines.size() == 2 && lines[0].size() == 17 + 20000 && lines[1] == "PONG", "large line");
+
+    // Growth is capped at the line limit rather than doubling past it
+    LineBuffer capped(30000);
+    lines.clear();
+    capped.push(bitmapLine.data(), bitmapLine.size(), collect);
+    CHECK(lines.size() == 2 && lines[0].capacity() <= 30000, "buffer growth capped at maxLineLength (capacity %zu)", lines[0].capacity());
+
+    // When the memory isn't there, the line is skipped (the device would otherwise abort) and
+    // parsing carries on after it. Fed in TCP-segment-sized chunks, like the real thing.
+    static size_t allocationLimit;
+    LineBuffer guarded(100000);
+    guarded.setAllocationCheck([](size_t bytes)
+                               { return bytes <= allocationLimit; });
+    allocationLimit = 8192;
+    lines.clear();
+    std::string burst = bitmapLine + "PING x\n";
+    size_t droppedTotal = 0;
+    for (size_t offset = 0; offset < burst.size(); offset += 1436)
+    {
+        droppedTotal += guarded.push(burst.data() + offset, std::min<size_t>(1436, burst.size() - offset), collect);
+    }
+    CHECK(droppedTotal == 1 && guarded.takeOutOfMemoryDrops() == 1, "line skipped for lack of memory");
+    CHECK(guarded.takeOutOfMemoryDrops() == 0, "out-of-memory count resets");
+    CHECK(lines.size() == 2 && lines[0] == "PONG" && lines[1] == "PING x", "resynchronised after the skipped line");
+
+    allocationLimit = 100000;
+    lines.clear();
+    guarded.push(bitmapLine.data(), bitmapLine.size(), collect);
+    CHECK(lines.size() == 2 && lines[0].size() == 17 + 20000, "large lines get through again once memory is back");
+
+    // The buffer never ends up bigger than what was checked (libstdc++'s reserve() rounds up
+    // to double the old capacity, which once made the check pass and the allocation abort)
+    static size_t largestChecked;
+    LineBuffer exact(30000);
+    exact.setAllocationCheck([](size_t bytes)
+                             { largestChecked = std::max(largestChecked, bytes); return true; });
+    largestChecked = 0;
+    lines.clear();
+    // Long enough that the last step is capped at the line limit, below double the old capacity
+    std::string nearLimit = "KEY-STATE BITMAP=" + std::string(25000, 'A') + "\nPONG\n";
+    for (size_t offset = 0; offset < nearLimit.size(); offset += 1436)
+    {
+        exact.push(nearLimit.data() + offset, std::min<size_t>(1436, nearLimit.size() - offset), collect);
+    }
+    CHECK(lines.size() == 2 && lines[0].capacity() + 1 <= largestChecked + 16,
+          "allocations stay within what was checked (capacity %zu, checked %zu)", lines[0].capacity(), largestChecked);
 }
 
 static void testVersions()
