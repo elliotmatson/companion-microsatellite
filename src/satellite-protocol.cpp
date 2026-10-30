@@ -49,7 +49,7 @@ std::string_view trimJsWhitespace(std::string_view value)
     return value;
 }
 
-int base64Value(char c)
+constexpr int base64Value(char c)
 {
     if (c >= 'A' && c <= 'Z')
         return c - 'A';
@@ -186,8 +186,19 @@ Params Params::parseInPlace(char *body, size_t length)
         }
         else
         {
-            body[write++] = c;
-            read++;
+            // Move a whole run of ordinary characters at once - a bitmap value is tens of KB
+            // of them, which otherwise get shifted down one byte at a time after the first quote
+            size_t runEnd = read + 1;
+            while (runEnd < length && body[runEnd] != '\\' && body[runEnd] != '"' && (quoted || body[runEnd] != ' '))
+            {
+                runEnd++;
+            }
+            if (write != read)
+            {
+                memmove(body + write, body + read, runEnd - read);
+            }
+            write += runEnd - read;
+            read = runEnd;
         }
     }
     fragments.push_back({fragmentStart, write});
@@ -555,12 +566,50 @@ size_t base64DecodedLength(std::string_view input)
     return (input.size() * 3) / 4;
 }
 
+namespace
+{
+/** base64Value() for every byte, -1 where it isn't a base64 character ('=' included) */
+struct Base64Table
+{
+    int8_t values[256];
+    constexpr Base64Table() : values()
+    {
+        for (int c = 0; c < 256; c++)
+        {
+            values[c] = static_cast<int8_t>(base64Value(static_cast<char>(c)));
+        }
+    }
+};
+constexpr Base64Table kBase64Table;
+} // namespace
+
 std::optional<size_t> base64Decode(std::string_view input, uint8_t *out, size_t capacity)
 {
     uint32_t accumulator = 0;
     int bits = 0;
     size_t written = 0;
     bool padding = false;
+
+    // Bitmaps are tens of KB of base64, so take whole groups of 4 valid characters at
+    // a time; anything else (padding, bad characters, a full buffer) falls through to
+    // the character-at-a-time loop below, which handles it exactly as before
+    const uint8_t *in = reinterpret_cast<const uint8_t *>(input.data());
+    size_t pos = 0;
+    while (pos + 4 <= input.size() && written + 3 <= capacity)
+    {
+        int a = kBase64Table.values[in[pos]], b = kBase64Table.values[in[pos + 1]];
+        int c = kBase64Table.values[in[pos + 2]], d = kBase64Table.values[in[pos + 3]];
+        if ((a | b | c | d) < 0)
+        {
+            break;
+        }
+        uint32_t group = (static_cast<uint32_t>(a) << 18) | (static_cast<uint32_t>(b) << 12) | (static_cast<uint32_t>(c) << 6) | static_cast<uint32_t>(d);
+        out[written++] = static_cast<uint8_t>(group >> 16);
+        out[written++] = static_cast<uint8_t>(group >> 8);
+        out[written++] = static_cast<uint8_t>(group);
+        pos += 4;
+    }
+    input.remove_prefix(pos);
 
     for (char c : input)
     {
@@ -569,7 +618,7 @@ std::optional<size_t> base64Decode(std::string_view input, uint8_t *out, size_t 
             padding = true;
             continue;
         }
-        int value = base64Value(c);
+        int value = kBase64Table.values[static_cast<uint8_t>(c)];
         if (value < 0 || padding)
         {
             return std::nullopt;

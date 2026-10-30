@@ -333,6 +333,75 @@ static void testHelpers()
     uint8_t small[2];
     CHECK(!base64Decode("aGVsbG8=", small, sizeof(small)).has_value(), "decode rejects overflow");
     CHECK(base64DecodedLength("aGVsbG8=") == 5, "decoded length");
+
+    // The decoder takes whole 4-character groups at a time for speed; it must behave exactly
+    // like the plain character-at-a-time decoder, on junk, padding and full buffers too
+    auto reference = [](std::string_view input, uint8_t *out, size_t capacity) -> std::optional<size_t>
+    {
+        auto value = [](char c)
+        {
+            if (c >= 'A' && c <= 'Z')
+                return c - 'A';
+            if (c >= 'a' && c <= 'z')
+                return c - 'a' + 26;
+            if (c >= '0' && c <= '9')
+                return c - '0' + 52;
+            if (c == '+' || c == '-')
+                return 62;
+            if (c == '/' || c == '_')
+                return 63;
+            return -1;
+        };
+        uint32_t accumulator = 0;
+        int bits = 0;
+        size_t written = 0;
+        bool padding = false;
+        for (char c : input)
+        {
+            if (c == '=')
+            {
+                padding = true;
+                continue;
+            }
+            int v = value(c);
+            if (v < 0 || padding)
+                return std::nullopt;
+            accumulator = (accumulator << 6) | static_cast<uint32_t>(v);
+            bits += 6;
+            if (bits >= 8)
+            {
+                bits -= 8;
+                if (written >= capacity)
+                    return std::nullopt;
+                out[written++] = static_cast<uint8_t>(accumulator >> bits);
+            }
+        }
+        return written;
+    };
+    const char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/-_";
+    uint32_t seed = 12345;
+    auto random = [&seed]()
+    { seed = seed * 1103515245 + 12345; return (seed >> 8) & 0xffff; };
+    int mismatches = 0;
+    for (int round = 0; round < 3000; round++)
+    {
+        std::string input;
+        size_t length = random() % 40;
+        for (size_t i = 0; i < length; i++)
+        {
+            uint32_t r = random() % 100;
+            input += r < 90 ? kAlphabet[random() % (sizeof(kAlphabet) - 1)] : (r < 95 ? '=' : static_cast<char>(random() % 256));
+        }
+        size_t capacity = random() % 32;
+        uint8_t expected[32], actual[32];
+        std::optional<size_t> want = reference(input, expected, capacity);
+        std::optional<size_t> got = base64Decode(input, actual, capacity);
+        if (want != got || (want && memcmp(expected, actual, *want) != 0))
+        {
+            mismatches++;
+        }
+    }
+    CHECK(mismatches == 0, "fast decoder matches the reference (%d mismatches)", mismatches);
 }
 
 int main(int argc, char **argv)
