@@ -6,8 +6,17 @@ Turns a "Cheap Yellow Display" into a 12-key Companion surface: a 4×3 grid of b
 
 Each [release](https://github.com/elliotmatson/companion-microsatellite/releases) has this example built for the ESP32-2432S028R, so you don't need the Arduino toolchain:
 
-- `companion-cyd-<version>.bin` - the whole image (bootloader, partition table and app). Flash it at `0x0`, eg. `esptool.py --chip esp32 write_flash 0x0 companion-cyd-<version>.bin`.
-- `companion-cyd-<version>-app.bin` - just the app, to update a board that already runs it: flash it at `0x10000`.
+- `companion-cyd-<version>.bin` - the whole image (bootloader, partition table and app), flashed at `0x0`.
+- `companion-cyd-<version>-app.bin` - just the app, to update a board that already runs it, flashed at `0x10000`.
+
+**From a browser** (Chrome or Edge on a computer, nothing to install):
+
+1. Download `companion-cyd-<version>.bin` from the release, and plug the board in over USB.
+2. Open [Espressif's web flasher](https://espressif.github.io/esptool-js/), click **Connect** and pick the board's serial port. If it doesn't show up on Windows, install the [CH340 USB driver](https://www.wch-ic.com/downloads/CH341SER_ZIP.html) the CYD uses.
+3. Under **Program**, set the flash address to `0x0`, choose the `.bin` file, and click **Program**.
+4. When it finishes, press the board's RST button.
+
+**From a terminal:** `esptool.py --chip esp32 write_flash 0x0 companion-cyd-<version>.bin`
 
 Then set it up as described below.
 

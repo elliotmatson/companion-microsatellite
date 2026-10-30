@@ -198,6 +198,7 @@ Callbacks declared with the old parameter types still compile: a key state lambd
 Arduino IDE sketches (`.ino`, no `platformio.ini`) - open directly in the Arduino IDE, or compile with `arduino-cli`:
 
 - [`examples/basic`](examples/basic) - WiFi, a NeoPixel driven by key color, and a physical button reporting presses back to Companion.
+- [`examples/keypad-3x3`](examples/keypad-3x3) - nine buttons with DotStar LEDs showing each key's color, on an ESP32-C3: debounced buttons, LEDs that go dark while disconnected, and a colors-only surface.
 - [`examples/encoder-led-ring`](examples/encoder-led-ring) - a layout manifest with a rotary encoder surrounded by a 24 LED NeoPixel ring (driven by Companion's LED ring styles) and a color-only button, sending multi-step rotations.
 - [`examples/subscriptions`](examples/subscriptions) - follows and presses a single button by absolute location using `SatelliteSubscription`, instead of registering a full surface. **Button subscriptions must be enabled in Companion's settings** for this to work.
 - [`examples/configuration-and-variables`](examples/configuration-and-variables) - a custom settings form (`CONFIG_FIELDS`/`DEVICE-CONFIG`, Companion -> device) alongside an input variable and an output variable (`setVariable()`/`setOnVariableSet()`, both directions).
