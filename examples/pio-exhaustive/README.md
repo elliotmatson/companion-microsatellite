@@ -24,6 +24,8 @@ pio device monitor -d examples/pio-exhaustive
 
 It builds against the library in this repository (`lib_deps = symlink://../..`), so it always tests your working copy. The app is over 1MB, so it uses the 1.5MB single-app partition table.
 
+The `esp32-minimal` env is the `esp32` build with the REST config API and mDNS left out ([build flags](../../README.md#leaving-out-the-rest-api-and-mdns)). It's there so CI keeps that configuration compiling; with no REST API, you'd have to call `setTarget()` in `main.cpp` to run it.
+
 ## Setup
 
 1. Set `WIFI_SSID` and `WIFI_PASSWORD` at the top of `src/main.cpp`.

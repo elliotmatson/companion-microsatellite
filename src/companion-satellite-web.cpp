@@ -4,16 +4,30 @@
  *
  * The REST API matches the one Companion's surface discovery uses to point a satellite
  * at itself (a JSON POST of {"host", "port"} to /api/config). Both it and mDNS are
- * optional, see SatelliteOptions.
+ * optional at runtime (SatelliteOptions::webConfig and ::mdns), and can be left out of
+ * the build altogether to save flash, by defining these for the whole build (eg.
+ * PlatformIO build_flags - a #define in a sketch doesn't reach the library):
+ *
+ * - COMPANION_SATELLITE_NO_WEB_CONFIG: no REST config API (and no ESPAsyncWebServer code)
+ * - COMPANION_SATELLITE_NO_MDNS: no mDNS advertisement
+ *
+ * They only remove code from this file - nothing in the headers depends on them - so a
+ * sketch compiled without them can't disagree with the library about any layout.
  */
 
 #include "companion-satellite.hpp"
 
+#ifndef COMPANION_SATELLITE_NO_WEB_CONFIG
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
+#endif
+#ifndef COMPANION_SATELLITE_NO_MDNS
 #include <mdns.h>
+#endif
 
 [[maybe_unused]] static const char *TAG = "Satellite";
+
+#ifndef COMPANION_SATELLITE_NO_WEB_CONFIG
 
 /** @brief Largest request body accepted by the config API */
 static constexpr size_t kMaxBodyBytes = 512;
@@ -86,6 +100,23 @@ void Satellite::endWebConfig()
     }
 }
 
+[[maybe_unused]] static constexpr bool kWebConfigBuilt = true;
+
+#else
+
+void Satellite::beginWebConfig()
+{
+    ESP_LOGI(TAG, "The REST config API isn't in this build (COMPANION_SATELLITE_NO_WEB_CONFIG) - set the target with setTarget()");
+}
+
+void Satellite::endWebConfig() {}
+
+[[maybe_unused]] static constexpr bool kWebConfigBuilt = false;
+
+#endif // COMPANION_SATELLITE_NO_WEB_CONFIG
+
+#ifndef COMPANION_SATELLITE_NO_MDNS
+
 void Satellite::beginMdns()
 {
     esp_err_t err = mdns_init();
@@ -99,7 +130,16 @@ void Satellite::beginMdns()
     mdns_instance_name_set(_deviceName.c_str());
 
     mdns_txt_item_t txt[] = {
-        {"restEnabled", _options.webConfig ? "true" : "false"},
+        {"restEnabled", kWebConfigBuilt && _options.webConfig ? "true" : "false"},
     };
     mdns_service_add(nullptr, "_companion-satellite", "_tcp", _apiPort, txt, sizeof(txt) / sizeof(txt[0]));
 }
+
+#else
+
+void Satellite::beginMdns()
+{
+    ESP_LOGI(TAG, "mDNS isn't in this build (COMPANION_SATELLITE_NO_MDNS)");
+}
+
+#endif // COMPANION_SATELLITE_NO_MDNS

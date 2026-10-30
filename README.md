@@ -104,6 +104,26 @@ To keep that headroom, the queue pauses once it's within `maxLineLength` plus a 
 
 If your bitmaps are big, set `maxLineLength` to just fit them and give `maxQueuedBytes` room for a few, so that receiving and drawing can overlap ([`examples/cyd`](examples/cyd) does this for 80×80 rgb).
 
+### Leaving out the REST API and mDNS
+
+`SatelliteOptions::webConfig` and `::mdns` turn the REST config API and the mDNS advertisement off at runtime, but their code is still in the firmware. If you don't need them, two build flags leave them out:
+
+| Flag | Leaves out | Saves (`examples/basic`, ESP32) |
+| --- | --- | --- |
+| `COMPANION_SATELLITE_NO_WEB_CONFIG` | The REST config API (and ESPAsyncWebServer's code) | ~38KB flash |
+| `COMPANION_SATELLITE_NO_MDNS` | mDNS discovery | ~40KB flash, ~2KB static RAM |
+| Both | | ~79KB flash, and ~9KB more free heap at runtime |
+
+Without both, Companion can't discover or configure the device, so set the target in code with `satellite.setTarget()`.
+
+They have to be defined for the whole build, as the library is compiled separately from your sketch and never sees a `#define` in it:
+
+- **PlatformIO:** `build_flags = -DCOMPANION_SATELLITE_NO_WEB_CONFIG -DCOMPANION_SATELLITE_NO_MDNS`
+- **arduino-cli:** `--build-property "compiler.cpp.extra_flags=-DCOMPANION_SATELLITE_NO_WEB_CONFIG -DCOMPANION_SATELLITE_NO_MDNS"`
+- **Arduino IDE:** the same `compiler.cpp.extra_flags=...` line in a `platform.local.txt` next to the ESP32 core's `platform.txt`
+
+They only remove code from the library's `.cpp` files - no header changes with them - so a sketch built without the flags can't disagree with the library about a class's layout.
+
 ## Migrating from 0.0.1
 
 0.1.0 changes some of the API. Most sketches only need the first two changes.

@@ -30,7 +30,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        chip: [esp32, esp32s2, esp32s3, esp32c3, esp32c6]
+        # esp32-minimal: esp32 without the REST config API and mDNS (build flags)
+        chip: [esp32, esp32-minimal, esp32s2, esp32s3, esp32c3, esp32c6]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
