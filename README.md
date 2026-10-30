@@ -99,7 +99,10 @@ Key state for a layout surface carries `state.controlId`, and `state.index` is t
 
 A raw rgb bitmap of W×H pixels arrives as a single ~W×H×4 byte line, which must fit in `SatelliteOptions::maxLineLength` (32KB by default - enough for 80×80). Larger lines are skipped with a warning rather than dropping the connection. For big keys, ask for `bitmapFormat = "png"` or `"webp"` (if you have a decoder), or a smaller size.
 
-Received messages wait in a queue for `loop()`, up to `SatelliteOptions::maxQueuedBytes` (64KB by default). When `loop()` falls behind, receiving pauses with TCP flow control - Companion waits - rather than updates being dropped. To keep that headroom, the queue pauses once it's within `maxLineLength` plus a TCP window (5760 bytes on the ESP32) of the limit, so with the defaults that's after about 24KB. If your bitmaps are big, set `maxLineLength` to just fit them and give `maxQueuedBytes` room for a few, so that receiving and drawing can overlap ([`examples/cyd`](examples/cyd) does this for 80×80 rgb).
+Received messages wait in a queue for `loop()`, up to `SatelliteOptions::maxQueuedBytes` (64KB by default). When `loop()` falls behind, receiving pauses with TCP flow control - Companion waits - rather than updates being dropped.
+To keep that headroom, the queue pauses once it's within `maxLineLength` plus a TCP window (5760 bytes on the ESP32) of the limit, so with the defaults that's after about 24KB.
+
+If your bitmaps are big, set `maxLineLength` to just fit them and give `maxQueuedBytes` room for a few, so that receiving and drawing can overlap ([`examples/cyd`](examples/cyd) does this for 80×80 rgb).
 
 ## Migrating from 0.0.1
 
@@ -179,7 +182,8 @@ Arduino IDE sketches (`.ino`, no `platformio.ini`) - open directly in the Arduin
 - [`examples/subscriptions`](examples/subscriptions) - follows and presses a single button by absolute location using `SatelliteSubscription`, instead of registering a full surface. **Button subscriptions must be enabled in Companion's settings** for this to work.
 - [`examples/configuration-and-variables`](examples/configuration-and-variables) - a custom settings form (`CONFIG_FIELDS`/`DEVICE-CONFIG`, Companion -> device) alongside an input variable and an output variable (`setVariable()`/`setOnVariableSet()`, both directions).
 - [`examples/pincode`](examples/pincode) - a surface that handles Companion's pincode-lock feature itself: shows the locked state and forwards digit presses with `pressPincodeKey()`.
-- [`examples/cyd`](examples/cyd) - renders a 4x3 button surface directly on a "Cheap Yellow Display" (ESP32-2432S028R) touchscreen, decoding and drawing the actual bitmap Companion sends for each key, and reporting touches as button presses. Needs the extra `TFT_eSPI`, `XPT2046_Touchscreen` and `PNGdec` libraries (it asks Companion for PNG bitmaps, 17x less data than raw rgb), with TFT_eSPI set up from [`User_Setup_CYD.h`](examples/cyd/User_Setup_CYD.h) (see the top of `cyd.ino`); targets that one board rather than building across variants.
+- [`examples/cyd`](examples/cyd) - renders a 4x3 button surface directly on a "Cheap Yellow Display" (ESP32-2432S028R) touchscreen, decoding and drawing the actual bitmap Companion sends for each key, and reporting touches as button presses.
+  Needs the extra `TFT_eSPI`, `XPT2046_Touchscreen` and `PNGdec` libraries (it asks Companion for PNG bitmaps, 17x less data than raw rgb), with TFT_eSPI set up from [`User_Setup_CYD.h`](examples/cyd/User_Setup_CYD.h) (see the top of `cyd.ino`); targets that one board rather than building across variants.
 
 PlatformIO projects are prefixed `pio-` and have their own `platformio.ini`:
 

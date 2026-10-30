@@ -250,10 +250,10 @@ private:
     String _surfaceName;
     SatelliteSurfaceConfig _config;
     std::vector<SatelliteSurfaceVariable> _variables;
-    bool _registered = false; /**< Guarded by the satellite's mutex */
-    bool _addDevicePending = false;  /**< ADD-DEVICE sent, no OK/ERROR yet (guarded by the satellite's mutex) */
-    uint32_t _addDeviceSentMs = 0;   /**< When it was last sent */
-    uint32_t _addDeviceRetryMs = 0;  /**< How long to wait before sending it again */
+    bool _registered = false;       /**< Guarded by the satellite's mutex */
+    bool _addDevicePending = false; /**< ADD-DEVICE sent, no OK/ERROR yet (guarded by the satellite's mutex) */
+    uint32_t _addDeviceSentMs = 0;  /**< When it was last sent */
+    uint32_t _addDeviceRetryMs = 0; /**< How long to wait before sending it again */
 };
 
 #endif // COMPANION_SURFACE_HPP

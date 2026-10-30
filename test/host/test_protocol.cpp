@@ -112,7 +112,8 @@ static void runCorpus(const char *path)
         {
             builder.deviceId(testCase["deviceId"].as<std::string>());
         }
-        for (JsonPair arg : testCase["args"].as<JsonObject>())
+        JsonObject args = testCase["args"].as<JsonObject>(); // a local, so newer GCC doesn't flag the temporary proxy
+        for (JsonPair arg : args)
         {
             if (arg.value().is<bool>())
                 builder.boolean(arg.key().c_str(), arg.value().as<bool>());
@@ -135,7 +136,8 @@ static void runCorpus(const char *path)
         {
             builder.deviceId(testCase["deviceId"].as<std::string>());
         }
-        for (JsonPair arg : testCase["args"].as<JsonObject>())
+        JsonObject args = testCase["args"].as<JsonObject>(); // a local, so newer GCC doesn't flag the temporary proxy
+        for (JsonPair arg : args)
         {
             builder.str(arg.key().c_str(), arg.value().as<std::string>());
         }

@@ -572,7 +572,8 @@ namespace
 struct Base64Table
 {
     int8_t values[256];
-    constexpr Base64Table() : values()
+    constexpr Base64Table()
+        : values()
     {
         for (int c = 0; c < 256; c++)
         {

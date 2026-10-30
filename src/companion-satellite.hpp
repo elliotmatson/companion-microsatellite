@@ -366,8 +366,8 @@ private:
 
     std::deque<QueuedItem> _queue;
     size_t _queuedBytes = 0;
-    bool _rxPaused = false;                /**< Holding acks back so Companion stops sending until loop() catches up */
-    std::vector<pbuf *> _heldPackets;   /**< Received while paused, acked by resumeReceiving() */
+    bool _rxPaused = false;           /**< Holding acks back so Companion stops sending until loop() catches up */
+    std::vector<pbuf *> _heldPackets; /**< Received while paused, acked by resumeReceiving() */
     uint32_t _lastLoopMs = 0;
     bool _loopWarningLogged = false;
     uint32_t _droppedUpdates = 0;
