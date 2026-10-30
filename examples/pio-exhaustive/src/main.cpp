@@ -1,4 +1,4 @@
-// Exhaustive feature-coverage example for the CompanionSatellite library.
+// Exhaustive feature-coverage example for the Companion microSatellite library.
 //
 // Registers every callback the library offers, then runs through every
 // public method on Satellite, SatelliteSurface and SatelliteSubscription

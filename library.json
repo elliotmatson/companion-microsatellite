@@ -1,5 +1,5 @@
 {
-  "name": "CompanionSatellite",
+  "name": "companion-microsatellite",
   "version": "1.0.0",
   "description": "Connect ESP32 microcontrollers to Bitfocus Companion via the Companion Satellite API. Virtual surfaces with bitmaps/colors/text, layout manifests with per-control styles and LED rings, rotary encoders with step counts, pincode input, button subscriptions, and variables.",
   "keywords": [

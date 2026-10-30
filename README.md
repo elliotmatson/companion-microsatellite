@@ -26,7 +26,7 @@ lib_deps =
 
 The library declares its own dependencies (ESPAsyncWebServer, AsyncTCP, ArduinoJson), so PlatformIO will pull those in automatically.
 
-**Arduino IDE:** clone or download this repository into your `Arduino/libraries/` folder (or use _Sketch > Include Library > Add .ZIP Library_), then install ESPAsyncWebServer, AsyncTCP, and ArduinoJson yourself via the Library Manager, since Arduino IDE doesn't resolve a library's own dependencies automatically the way PlatformIO does.
+**Arduino IDE:** install "Companion microSatellite" from the Library Manager, and accept its dependencies: ESP Async WebServer and Async TCP (both by ESP32Async), and ArduinoJson. To use an unreleased version instead, clone or download this repository into your `Arduino/libraries/` folder (or use _Sketch > Include Library > Add .ZIP Library_) and install those three yourself.
 
 ## Usage
 
