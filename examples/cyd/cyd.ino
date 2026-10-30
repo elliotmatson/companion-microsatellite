@@ -11,42 +11,36 @@
 // touch, USB-C, ESP32-S3 variants, etc.) with different pin wiring - the
 // pin numbers below match the common resistive-touch ESP32-2432S028R.
 // If your display is garbled or touch doesn't line up, you very likely
-// have a different revision and will need to adjust the TFT_eSPI setup
-// block and/or touch pins below.
+// have a different revision and will need to adjust User_Setup_CYD.h
+// and/or the touch pins below.
 //
 // Library dependencies (install via Arduino Library Manager):
 // - ESPAsyncWebServer (ESP32Async)
 // - AsyncTCP (ESP32Async)
 // - ArduinoJson
 // - TFT_eSPI (Bodmer)
-// - XPT2046_Touchscreen (Paul Stoffregen)
+// - XPT2046_Touchscreen (Paul Stoffregen), 1.4 or later
+//
+// TFT_eSPI setup: TFT_eSPI takes its display settings from the User_Setup.h
+// in its own library folder, and those settings have to be the same for the
+// library's code and this sketch. Defining them in the sketch instead isn't
+// enough: the library is compiled separately and never sees them, and the
+// mismatch corrupts memory at runtime. So use the User_Setup_CYD.h next to
+// this sketch:
+// - Arduino IDE / arduino-cli: copy User_Setup_CYD.h over User_Setup.h in
+//   the TFT_eSPI library folder (eg. ~/Arduino/libraries/TFT_eSPI/).
+// - PlatformIO: add it to every file with
+//     build_flags = -include path/to/User_Setup_CYD.h
 
 #include <Arduino.h>
-
-// TFT_eSPI is normally configured by editing User_Setup.h inside the
-// installed library folder. Defining USER_SETUP_LOADED and the settings it
-// would otherwise read from that file - before including TFT_eSPI.h - lets
-// this sketch configure the display itself instead, so nothing outside this
-// file needs to be edited.
-#define USER_SETUP_LOADED 1
-#define ILI9341_DRIVER
-#define TFT_WIDTH 240
-#define TFT_HEIGHT 320
-#define TFT_MISO 12
-#define TFT_MOSI 13
-#define TFT_SCLK 14
-#define TFT_CS 15
-#define TFT_DC 2
-#define TFT_RST -1
-#define TFT_BL 21
-#define TFT_BACKLIGHT_ON HIGH
-#define SPI_FREQUENCY 40000000
-#define SPI_READ_FREQUENCY 20000000
-#define SPI_TOUCH_FREQUENCY 2500000
-#define USE_HSPI_PORT
-#define LOAD_GLCD
 #include <SPI.h>
 #include <TFT_eSPI.h>
+
+// Fail the build, rather than the board, if TFT_eSPI isn't set up for the CYD
+// (see above). Its default setup is for an ESP8266 NodeMCU.
+#if !(defined(ILI9341_DRIVER) || defined(ILI9341_2_DRIVER)) || TFT_MOSI != 13 || TFT_SCLK != 14 || TFT_CS != 15 || TFT_DC != 2
+#error "TFT_eSPI isn't configured for the CYD - install User_Setup_CYD.h as described at the top of cyd.ino"
+#endif
 
 #include <XPT2046_Touchscreen.h>
 #include <WiFi.h>
@@ -175,11 +169,11 @@ void drawCellBitmap(uint8_t index, const SatelliteEncodedData &bitmap)
 // Map a raw touch reading to a key index, or -1 if outside the grid.
 int8_t touchToKeyIndex(uint16_t rawX, uint16_t rawY)
 {
-  // The touch panel's axes are rotated relative to the display in landscape
-  // orientation on this board, so X/Y are swapped here - see the
-  // calibration note above if this doesn't match your unit.
-  int16_t screenX = map(rawY, TOUCH_RAW_X_MIN, TOUCH_RAW_X_MAX, 0, kScreenWidth);
-  int16_t screenY = map(rawX, TOUCH_RAW_Y_MIN, TOUCH_RAW_Y_MAX, 0, kScreenHeight);
+  // touchscreen.setRotation(1) in setup() already turns the raw readings to
+  // match the landscape display, so x follows the screen's x and y its y -
+  // see the calibration note above if touches feel offset on your unit.
+  int16_t screenX = map(rawX, TOUCH_RAW_X_MIN, TOUCH_RAW_X_MAX, 0, kScreenWidth);
+  int16_t screenY = map(rawY, TOUCH_RAW_Y_MIN, TOUCH_RAW_Y_MAX, 0, kScreenHeight);
   screenX = constrain(screenX, 0, kScreenWidth - 1);
   screenY = constrain(screenY, 0, kScreenHeight - 1);
 
@@ -196,6 +190,9 @@ void setup()
 
   tft.init();
   tft.setRotation(1); // landscape; try 3 if the display looks upside down
+  // drawCellBitmap() builds its RGB565 pixels as native (little-endian)
+  // uint16_t values; pushImage() sends them high byte first unless told to swap.
+  tft.setSwapBytes(true);
   tft.fillScreen(TFT_BLACK);
 
   touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);

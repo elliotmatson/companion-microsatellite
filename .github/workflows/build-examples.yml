@@ -133,5 +133,8 @@ jobs:
           arduino-cli config set library.enable_unsafe_install true
           arduino-cli lib install --git-url https://github.com/ESP32Async/AsyncTCP.git
           arduino-cli lib install --git-url https://github.com/ESP32Async/ESPAsyncWebServer.git
+      - name: Install the CYD's TFT_eSPI setup
+        # TFT_eSPI only reads its settings from its own User_Setup.h (see the top of cyd.ino)
+        run: cp examples/cyd/User_Setup_CYD.h ~/Arduino/libraries/TFT_eSPI/User_Setup.h
       - name: Compile cyd for esp32:esp32:esp32
         run: arduino-cli compile --fqbn esp32:esp32:esp32 --library . examples/cyd
