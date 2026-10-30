@@ -4,12 +4,12 @@ A rotary encoder surrounded by a 24-LED ring, and a separate button with a statu
 
 ## Hardware
 
-| Part | Pins |
-| --- | --- |
-| Rotary encoder | A: GPIO 32, B: GPIO 33, push switch: GPIO 25 |
-| 24 × WS2812/NeoPixel ring around the encoder | data: GPIO 18 |
-| Push button | GPIO 26 |
-| Single NeoPixel for the button | data: GPIO 19 |
+| Part                                         | Pins                                         |
+| -------------------------------------------- | -------------------------------------------- |
+| Rotary encoder                               | A: GPIO 32, B: GPIO 33, push switch: GPIO 25 |
+| 24 × WS2812/NeoPixel ring around the encoder | data: GPIO 18                                |
+| Push button                                  | GPIO 26                                      |
+| Single NeoPixel for the button               | data: GPIO 19                                |
 
 Buttons and the encoder switch connect to ground (internal pull-ups).
 

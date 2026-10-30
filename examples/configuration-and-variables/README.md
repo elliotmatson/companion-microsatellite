@@ -3,7 +3,7 @@
 The two ways data moves between a device and Companion besides button presses:
 
 - **Config fields** (`CONFIG_FIELDS` / `DEVICE-CONFIG`): a small settings form the device describes and Companion shows in the surface's settings. Companion sends the values to the device after it registers, and again whenever someone edits them.
-- **Variables**: named values attached to the surface. An *input* variable is produced by the device (`setVariable()`), an *output* variable by Companion (`setOnVariableSet()`).
+- **Variables**: named values attached to the surface. An _input_ variable is produced by the device (`setVariable()`), an _output_ variable by Companion (`setOnVariableSet()`).
 
 No hardware beyond the ESP32 is needed. Everything it does shows up in the serial monitor.
 

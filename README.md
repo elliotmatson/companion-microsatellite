@@ -108,11 +108,11 @@ If your bitmaps are big, set `maxLineLength` to just fit them and give `maxQueue
 
 `SatelliteOptions::webConfig` and `::mdns` turn the REST config API and the mDNS advertisement off at runtime, but their code is still in the firmware. If you don't need them, two build flags leave them out:
 
-| Flag | Leaves out | Saves (`examples/basic`, ESP32) |
-| --- | --- | --- |
-| `COMPANION_SATELLITE_NO_WEB_CONFIG` | The REST config API (and ESPAsyncWebServer's code) | ~38KB flash |
-| `COMPANION_SATELLITE_NO_MDNS` | mDNS discovery | ~40KB flash, ~2KB static RAM |
-| Both | | ~79KB flash, and ~9KB more free heap at runtime |
+| Flag                                | Leaves out                                         | Saves (`examples/basic`, ESP32)                 |
+| ----------------------------------- | -------------------------------------------------- | ----------------------------------------------- |
+| `COMPANION_SATELLITE_NO_WEB_CONFIG` | The REST config API (and ESPAsyncWebServer's code) | ~38KB flash                                     |
+| `COMPANION_SATELLITE_NO_MDNS`       | mDNS discovery                                     | ~40KB flash, ~2KB static RAM                    |
+| Both                                |                                                    | ~79KB flash, and ~9KB more free heap at runtime |
 
 Without both, Companion can't discover or configure the device, so set the target in code with `satellite.setTarget()`.
 
