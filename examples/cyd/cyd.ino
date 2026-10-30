@@ -42,6 +42,7 @@
 #error "TFT_eSPI isn't configured for the CYD - install User_Setup_CYD.h as described at the top of cyd.ino"
 #endif
 
+#include <Preferences.h>
 #include <XPT2046_Touchscreen.h>
 #include <WiFi.h>
 #include "companion-satellite.hpp"
@@ -58,13 +59,29 @@
 #define XPT2046_CLK 25
 #define XPT2046_CS 33
 
-// Raw touch calibration - these are reasonable defaults for this board, but
-// resistive touch panels vary unit to unit. If touches feel offset, adjust
-// these to match your panel (print touchscreen.getPoint() to calibrate).
+// The BOOT button, read once the sketch is running (holding it during reset
+// puts the ESP32 into download mode instead).
+#define BOOT_BUTTON 0
+
+// Raw touch calibration: the raw readings at the screen's left/right and
+// top/bottom edges. These defaults suit most of these boards, but resistive
+// touch panels vary unit to unit - if touches feel offset, hold a finger on
+// the screen while the board starts up, or press the BOOT button once it's
+// running, to run the on-screen calibration. It saves its result in flash
+// and is used from then on.
 #define TOUCH_RAW_X_MIN 200
 #define TOUCH_RAW_X_MAX 3700
 #define TOUCH_RAW_Y_MIN 240
 #define TOUCH_RAW_Y_MAX 3800
+
+struct TouchCalibration
+{
+  int16_t xMin = TOUCH_RAW_X_MIN;
+  int16_t xMax = TOUCH_RAW_X_MAX;
+  int16_t yMin = TOUCH_RAW_Y_MIN;
+  int16_t yMax = TOUCH_RAW_Y_MAX;
+};
+TouchCalibration touchCalibration;
 
 // Display dimensions in landscape orientation.
 constexpr int16_t kScreenWidth = 320;
@@ -166,14 +183,121 @@ void drawCellBitmap(uint8_t index, const SatelliteEncodedData &bitmap)
   tft.drawRect(x, y, w, h, TFT_DARKGREY);
 }
 
+// Load a touch calibration saved by runTouchCalibration(), if there is one.
+void loadTouchCalibration()
+{
+  Preferences prefs;
+  prefs.begin("cyd-touch");
+  if (prefs.isKey("xMin"))
+  {
+    touchCalibration.xMin = prefs.getShort("xMin");
+    touchCalibration.xMax = prefs.getShort("xMax");
+    touchCalibration.yMin = prefs.getShort("yMin");
+    touchCalibration.yMax = prefs.getShort("yMax");
+  }
+  prefs.end();
+}
+
+// Wait for a tap, and return the average raw reading while the finger was down.
+TS_Point readCalibrationTap()
+{
+  for (;;)
+  {
+    while (touchscreen.touched())
+    {
+      delay(10); // let go of any earlier touch first
+    }
+    while (!touchscreen.touched())
+    {
+      delay(10);
+    }
+
+    int32_t sumX = 0, sumY = 0;
+    uint16_t samples = 0;
+    while (touchscreen.touched())
+    {
+      TS_Point point = touchscreen.getPoint();
+      sumX += point.x;
+      sumY += point.y;
+      samples++;
+      delay(10);
+    }
+    if (samples >= 5) // ignore brushes and bounces
+    {
+      return TS_Point(sumX / samples, sumY / samples, 0);
+    }
+  }
+}
+
+void drawCrosshair(int16_t x, int16_t y, uint16_t color)
+{
+  tft.drawFastHLine(x - 10, y, 21, color);
+  tft.drawFastVLine(x, y - 10, 21, color);
+}
+
+// On-screen calibration: tap a cross near the top-left corner, then one near
+// the bottom-right, and the raw readings at the screen edges are worked out
+// from those two and saved to flash.
+void runTouchCalibration()
+{
+  constexpr int16_t kInset = 20;
+  const int16_t x0 = kInset, y0 = kInset;
+  const int16_t x1 = kScreenWidth - 1 - kInset, y1 = kScreenHeight - 1 - kInset;
+
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(2);
+  tft.drawString("Tap each cross", kScreenWidth / 2, kScreenHeight / 2);
+
+  drawCrosshair(x0, y0, TFT_WHITE);
+  TS_Point topLeft = readCalibrationTap();
+  drawCrosshair(x0, y0, TFT_BLACK);
+  drawCrosshair(x1, y1, TFT_WHITE);
+  TS_Point bottomRight = readCalibrationTap();
+  drawCrosshair(x1, y1, TFT_BLACK);
+
+  // A small spread means the same spot was tapped twice (or the panel's
+  // axes don't match the display) - keep the old calibration then.
+  if (abs(bottomRight.x - topLeft.x) < 1000 || abs(bottomRight.y - topLeft.y) < 1000)
+  {
+    Serial.println("Touch calibration: taps too close together, keeping the previous calibration");
+    tft.drawString("Didn't work - try again", kScreenWidth / 2, kScreenHeight / 2);
+  }
+  else
+  {
+    float xPerPixel = float(bottomRight.x - topLeft.x) / (x1 - x0);
+    float yPerPixel = float(bottomRight.y - topLeft.y) / (y1 - y0);
+    touchCalibration.xMin = topLeft.x - xPerPixel * x0;
+    touchCalibration.xMax = topLeft.x + xPerPixel * (kScreenWidth - x0);
+    touchCalibration.yMin = topLeft.y - yPerPixel * y0;
+    touchCalibration.yMax = topLeft.y + yPerPixel * (kScreenHeight - y0);
+
+    Preferences prefs;
+    prefs.begin("cyd-touch");
+    prefs.putShort("xMin", touchCalibration.xMin);
+    prefs.putShort("xMax", touchCalibration.xMax);
+    prefs.putShort("yMin", touchCalibration.yMin);
+    prefs.putShort("yMax", touchCalibration.yMax);
+    prefs.end();
+
+    Serial.printf("Touch calibration saved: x %d..%d, y %d..%d\n", touchCalibration.xMin, touchCalibration.xMax,
+                  touchCalibration.yMin, touchCalibration.yMax);
+    tft.drawString("Calibration saved", kScreenWidth / 2, kScreenHeight / 2);
+  }
+  delay(1500);
+  tft.setTextSize(1);
+  tft.fillScreen(TFT_BLACK);
+}
+
 // Map a raw touch reading to a key index, or -1 if outside the grid.
 int8_t touchToKeyIndex(uint16_t rawX, uint16_t rawY)
 {
   // touchscreen.setRotation(1) in setup() already turns the raw readings to
   // match the landscape display, so x follows the screen's x and y its y -
   // see the calibration note above if touches feel offset on your unit.
-  int16_t screenX = map(rawX, TOUCH_RAW_X_MIN, TOUCH_RAW_X_MAX, 0, kScreenWidth);
-  int16_t screenY = map(rawY, TOUCH_RAW_Y_MIN, TOUCH_RAW_Y_MAX, 0, kScreenHeight);
+  int16_t screenX = map(rawX, touchCalibration.xMin, touchCalibration.xMax, 0, kScreenWidth);
+  int16_t screenY = map(rawY, touchCalibration.yMin, touchCalibration.yMax, 0, kScreenHeight);
   screenX = constrain(screenX, 0, kScreenWidth - 1);
   screenY = constrain(screenY, 0, kScreenHeight - 1);
 
@@ -198,6 +322,14 @@ void setup()
   touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
   touchscreen.begin(touchscreenSPI);
   touchscreen.setRotation(1);
+
+  // Holding a finger on the screen during startup runs the touch calibration.
+  loadTouchCalibration();
+  if (touchscreen.touched())
+  {
+    runTouchCalibration();
+  }
+  pinMode(BOOT_BUTTON, INPUT_PULLUP);
 
   for (uint8_t i = 0; i < kKeyCount; i++)
   {
@@ -247,6 +379,19 @@ void loop()
 {
   // Draws any key updates received since last time (see drawCellBitmap).
   satellite.loop();
+
+  // The BOOT button runs the touch calibration too.
+  if (digitalRead(BOOT_BUTTON) == LOW)
+  {
+    runTouchCalibration();
+    for (uint8_t i = 0; i < kKeyCount; i++)
+    {
+      drawCellColor(i, TFT_BLACK);
+    }
+    // The calibration screen wiped the keys: reconnecting makes Companion send them all again.
+    satellite.setTarget(satellite.getTargetHostname(), satellite.getTargetPort());
+    activeKeyIndex = -1;
+  }
 
   if (touchscreen.touched())
   {
