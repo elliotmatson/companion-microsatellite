@@ -97,9 +97,12 @@ constexpr int16_t kCellHeight = kScreenHeight / kGridRows;
 // Requested square bitmap size, matching the cell size exactly so each
 // button image fills its cell. Sent as raw 8-bit RGB, 3 bytes per pixel,
 // base64-encoded - kCellWidth/kCellHeight are both 80px here, so each
-// KEY-STATE line is ~26KB, under the default SatelliteOptions::maxLineLength
-// (32KB).
+// KEY-STATE line is ~26KB.
 constexpr uint16_t kBitmapSize = 80;
+
+// The longest KEY-STATE line to expect: the base64 bitmap (4 characters per
+// 3 bytes) plus 1KB for the rest of the message.
+constexpr size_t kMaxLineLength = ((size_t)kBitmapSize * kBitmapSize * 3 + 2) / 3 * 4 + 1024;
 
 TFT_eSPI tft = TFT_eSPI();
 SPIClass touchscreenSPI = SPIClass(VSPI);
@@ -155,17 +158,14 @@ void drawCellBitmap(uint8_t index, const SatelliteEncodedData &bitmap)
 
   // Decode and convert in one buffer: each 3-byte RGB888 pixel shrinks to a
   // 2-byte RGB565 one, so converting front to back never overwrites input
-  // that hasn't been read yet. One allocation instead of two.
+  // that hasn't been read yet. It's static rather than allocated per key: no
+  // heap churn while a page of images streams in, and nothing to run out of
+  // (on builds without C++ exceptions, a failed new aborts even with nothrow).
   constexpr size_t kPixels = (size_t)kBitmapSize * kBitmapSize;
-  uint16_t *rgb565 = new (std::nothrow) uint16_t[(kRawLength + 1) / 2];
-  if (!rgb565)
-  {
-    return;
-  }
+  static uint16_t rgb565[(kRawLength + 1) / 2];
   uint8_t *rgb888 = reinterpret_cast<uint8_t *>(rgb565);
   if (bitmap.decode(rgb888, kRawLength) != kRawLength)
   {
-    delete[] rgb565;
     return;
   }
 
@@ -178,7 +178,6 @@ void drawCellBitmap(uint8_t index, const SatelliteEncodedData &bitmap)
   int16_t x, y, w, h;
   cellRect(index, x, y, w, h);
   tft.pushImage(x + (w - kBitmapSize) / 2, y + (h - kBitmapSize) / 2, kBitmapSize, kBitmapSize, rgb565);
-  delete[] rgb565;
 
   tft.drawRect(x, y, w, h, TFT_DARKGREY);
 }
@@ -344,7 +343,13 @@ void setup()
   }
   Serial.println("Connected to WiFi");
 
-  satellite.begin();
+  // Size the receive buffers for this sketch's bitmaps: a line just long enough for one
+  // key, and room to queue a couple while the next arrives, so receiving and drawing
+  // overlap. (With the defaults, receiving pauses after every key until it's drawn.)
+  SatelliteOptions options;
+  options.maxLineLength = kMaxLineLength;
+  options.maxQueuedBytes = 96 * 1024;
+  satellite.begin(options);
 
   // Companion -> device: draw the bitmap it sent for this key, or fall back
   // to a flat color fill if no bitmap is available yet.
