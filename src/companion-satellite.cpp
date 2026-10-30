@@ -31,6 +31,10 @@ static constexpr uint32_t kRetiredClientGraceMs = 1000;
 static constexpr uint32_t kRetiredClientMaxAgeMs = 60000;
 static constexpr uint32_t kLoopWarningMs = 5000;
 
+/** Resend an ADD-DEVICE that Companion hasn't answered after this long, doubling up to the max */
+static constexpr uint32_t kAddDeviceRetryMs = 5000;
+static constexpr uint32_t kMaxAddDeviceRetryMs = 30000;
+
 /** Most outgoing data to hold while waiting for TCP send buffer space */
 static constexpr size_t kMaxTxBufferBytes = 16384;
 
@@ -558,6 +562,7 @@ void Satellite::resetRegistrations()
     for (SatelliteSurface *surface : _surfaces)
     {
         surface->_registered = false;
+        surface->_addDevicePending = false;
     }
     for (SatelliteSubscription *subscription : _subscriptions)
     {
@@ -690,6 +695,10 @@ void Satellite::tick()
                 retireClient();
                 scheduleReconnect();
                 break;
+            }
+            if (_state == SatelliteConnectionState::READY)
+            {
+                retryUnansweredAddDevices(now);
             }
             if (now - _lastPingMs >= kPingIntervalMs)
             {
@@ -1041,7 +1050,7 @@ void Satellite::registerAll()
 {
     for (SatelliteSurface *surface : _surfaces)
     {
-        send(surface->buildAddDeviceCommand());
+        sendAddDevice(*surface);
     }
 
     if (_subscriptions.empty())
@@ -1107,6 +1116,25 @@ void Satellite::handleResponse(std::unique_ptr<Message> message)
     }
 
     std::optional<std::string_view> deviceId = params.get("DEVICEID");
+    bool isAddDevice = message->is("ADD-DEVICE");
+    SatelliteSurface *addedSurface = nullptr;
+    if (isAddDevice && deviceId)
+    {
+        for (SatelliteSurface *surface : _surfaces)
+        {
+            if (std::string_view(surface->getID().c_str()) == *deviceId)
+            {
+                addedSurface = surface;
+            }
+        }
+    }
+    if (addedSurface && !ok && addedSurface->_registered)
+    {
+        // A retried ADD-DEVICE crossing the first one's OK ("Device already added") - it's in
+        ESP_LOGD(TAG, "Ignoring %s for already registered %s: %s", command.c_str(), addedSurface->getID().c_str(), errorText.c_str());
+        return;
+    }
+
     if (!ok)
     {
         ESP_LOGW(TAG, "Companion rejected %s%s%.*s: %s", command.c_str(), deviceId ? " for " : "",
@@ -1118,16 +1146,10 @@ void Satellite::handleResponse(std::unique_ptr<Message> message)
         return;
     }
 
-    bool isAddDevice = message->is("ADD-DEVICE");
-    if (isAddDevice)
+    if (addedSurface)
     {
-        for (SatelliteSurface *surface : _surfaces)
-        {
-            if (std::string_view(surface->getID().c_str()) == *deviceId)
-            {
-                surface->_registered = ok;
-            }
-        }
+        addedSurface->_registered = ok;
+        addedSurface->_addDevicePending = false;
     }
 
     // The surface hears about its registration, and about any errors
@@ -1138,6 +1160,41 @@ void Satellite::handleResponse(std::unique_ptr<Message> message)
         item.target = std::string(*deviceId);
         item.message = std::move(message);
         enqueue(std::move(item));
+    }
+}
+
+/** Send a surface's ADD-DEVICE, and start waiting for Companion's answer. Call with _mutex held */
+void Satellite::sendAddDevice(SatelliteSurface &surface)
+{
+    std::string command = surface.buildAddDeviceCommand();
+    if (command.empty())
+    {
+        return; // can't be registered, already logged
+    }
+    send(std::move(command));
+    surface._addDevicePending = true;
+    surface._addDeviceSentMs = millis();
+    surface._addDeviceRetryMs = kAddDeviceRetryMs;
+}
+
+/**
+ * Resend ADD-DEVICEs Companion hasn't answered. It can leave one unanswered: if the device
+ * is still registered on an old connection it hasn't noticed is dead (eg. right after a
+ * reboot), it sends its "Device exists elsewhere" ERROR to that old connection. Once it
+ * drops that, a resend goes through. Call with _mutex held.
+ */
+void Satellite::retryUnansweredAddDevices(uint32_t now)
+{
+    for (SatelliteSurface *surface : _surfaces)
+    {
+        if (surface->_addDevicePending && now - surface->_addDeviceSentMs >= surface->_addDeviceRetryMs)
+        {
+            ESP_LOGW(TAG, "No answer to ADD-DEVICE for %s after %u ms, sending it again", surface->getID().c_str(),
+                     static_cast<unsigned>(now - surface->_addDeviceSentMs));
+            uint32_t retryMs = std::min(surface->_addDeviceRetryMs * 2, kMaxAddDeviceRetryMs);
+            sendAddDevice(*surface);
+            surface->_addDeviceRetryMs = retryMs;
+        }
     }
 }
 
@@ -1377,7 +1434,7 @@ bool Satellite::add(SatelliteSurface &surface)
     _surfaces.push_back(&surface);
     if (_state == SatelliteConnectionState::READY)
     {
-        send(surface.buildAddDeviceCommand());
+        sendAddDevice(surface);
     }
     return true;
 }

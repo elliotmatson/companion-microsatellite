@@ -260,6 +260,8 @@ private:
     void setState(SatelliteConnectionState state);
     void onClientConnect(AsyncClient *client);
     void onClientDisconnect(AsyncClient *client);
+    void sendAddDevice(SatelliteSurface &surface);
+    void retryUnansweredAddDevices(uint32_t now);
     void onClientPacket(AsyncClient *client, pbuf *pb);
     void onClientData(AsyncClient *client, const char *data, size_t length);
     size_t receivePauseThreshold() const;

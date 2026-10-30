@@ -916,6 +916,69 @@ static void testReceiveFlowControl()
     CHECK(!satellite._rxPaused && satellite._heldPackets.empty(), "held segments released on disconnect");
 }
 
+// An ADD-DEVICE Companion never answers is sent again. Seen after rebooting a CYD: Companion
+// still had the surface on the old, dead connection, so it sent its "Device exists elsewhere"
+// ERROR there, and the new connection waited for an answer for ever.
+static void testAddDeviceRetry()
+{
+    currentTest = "add-device-retry";
+    Satellite satellite("test-add-retry");
+    SatelliteSurfaceConfig config;
+    config.totalKeys = 4;
+    SatelliteSurface surface(satellite, "Keys", config);
+    satellite.setTarget("c", 16622);
+    satellite.begin(testOptions());
+    AsyncClient *client = connectReady(satellite);
+    std::string id = surface.getID().c_str();
+    CHECK(countLinesStarting(takeLines(client), "ADD-DEVICE ") == 1, "ADD-DEVICE sent once");
+
+    // Companion stays quiet about it (but answers PINGs, so the connection looks fine)
+    auto quietly = [&](uint32_t ms)
+    {
+        for (uint32_t elapsed = 0; elapsed < ms; elapsed += 1000)
+        {
+            advance(satellite, 1000);
+            client->simulateData("PONG\n");
+        }
+    };
+    quietly(4000);
+    CHECK(countLinesStarting(takeLines(client), "ADD-DEVICE ") == 0, "not resent before 5s");
+    quietly(2000);
+    std::vector<std::string> lines = takeLines(client);
+    CHECK(countLinesStarting(lines, "ADD-DEVICE ") == 1, "resent after 5s");
+    quietly(8000);
+    CHECK(countLinesStarting(takeLines(client), "ADD-DEVICE ") == 0, "backs off: not again before 10s");
+    quietly(3000);
+    CHECK(countLinesStarting(takeLines(client), "ADD-DEVICE ") == 1, "and again after 10s");
+    CHECK(satellite.getConnectionState() == SatelliteConnectionState::READY && currentClient(satellite) == client, "still the same connection");
+
+    // The old connection is gone and the retry is accepted
+    client->simulateData("ADD-DEVICE OK DEVICEID=\"" + id + "\"\n");
+    satellite.loop();
+    CHECK(surface.isRegistered(), "registered");
+    // A retry that crossed the OK is refused as a duplicate - that mustn't undo the registration
+    client->simulateData("ADD-DEVICE ERROR DEVICEID=\"" + id + "\" MESSAGE=\"Device already added\"\n");
+    satellite.loop();
+    CHECK(surface.isRegistered(), "a late duplicate ERROR doesn't unregister");
+    quietly(60000);
+    CHECK(countLinesStarting(takeLines(client), "ADD-DEVICE ") == 0, "no more retries once answered");
+
+    // An outright rejection is an answer too: no retrying it
+    Satellite other("test-add-rejected");
+    SatelliteSurface rejected(other, "Rejected", config);
+    other.setTarget("c", 16622);
+    other.begin(testOptions());
+    AsyncClient *otherClient = connectReady(other);
+    takeLines(otherClient);
+    otherClient->simulateData("ADD-DEVICE ERROR DEVICEID=\"" + std::string(rejected.getID().c_str()) + "\" MESSAGE=\"Invalid KEYS_TOTAL\"\n");
+    for (int second = 0; second < 20; second++)
+    {
+        advance(other, 1000);
+        otherClient->simulateData("PONG\n");
+    }
+    CHECK(!rejected.isRegistered() && countLinesStarting(takeLines(otherClient), "ADD-DEVICE ") == 0, "a rejected ADD-DEVICE isn't retried");
+}
+
 int main(int argc, char **argv)
 {
     g_mockVerbose = argc > 1 && std::string(argv[1]) == "-v";
@@ -937,6 +1000,7 @@ int main(int argc, char **argv)
     testConfigApi();
     testReceiveOutOfMemory();
     testReceiveFlowControl();
+    testAddDeviceRetry();
 
     currentTest = "pbuf-leaks";
     CHECK(pbuf::live() == 0, "every received pbuf acked or freed (%d left)", pbuf::live());
