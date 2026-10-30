@@ -1,0 +1,4 @@
+# A Satellite destroyed while still connecting deliberately leaks its AsyncClient, as
+# AsyncTCP may yet complete a DNS lookup on it (see Satellite::~Satellite). Retirement
+# and deletion of clients during normal operation is checked by the tests themselves.
+leak:Satellite::connectToCompanion

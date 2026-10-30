@@ -84,7 +84,8 @@ void setup()
       &buttonTaskHandle);
 
   // The ISR only notifies buttonTask, it doesn't call into the library
-  // directly (see buttonTask for why).
+  // directly (see buttonTask for why). The button pulls the pin to ground.
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
   attachInterrupt(BUTTON_PIN, [](void)
                   { vTaskNotifyGiveFromISR(buttonTaskHandle, NULL); }, CHANGE);
 
@@ -108,8 +109,10 @@ void setup()
                                 strip.show(); });
 }
 
-// Button handling happens in buttonTask, so the loop task isn't needed.
 void loop()
 {
-  vTaskDelete(NULL);
+  // Runs the callbacks above (key state, brightness) here on the loop task,
+  // rather than on the network task.
+  satellite.loop();
+  delay(5);
 }

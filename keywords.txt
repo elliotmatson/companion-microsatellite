@@ -8,45 +8,67 @@
 
 Satellite	KEYWORD1
 SatelliteSurface	KEYWORD1
-SubscriptionState	KEYWORD1
+SatelliteSubscription	KEYWORD1
+SatelliteOptions	KEYWORD1
+SatelliteDispatchMode	KEYWORD1
+SatelliteConnectionState	KEYWORD1
+SatelliteFeature	KEYWORD1
 SatelliteSurfaceKeyType	KEYWORD1
 SatelliteAction	KEYWORD1
 SatellitePageDirection	KEYWORD1
-color	KEYWORD1
+SatelliteColor	KEYWORD1
+SatelliteEncodedData	KEYWORD1
+SatelliteControlState	KEYWORD1
+SatelliteSurfaceKeyState	KEYWORD1
+SatelliteLockedState	KEYWORD1
 SatelliteSurfacePincodeSupport	KEYWORD1
 SatelliteSurfaceVariableType	KEYWORD1
 SatelliteSurfaceConfig	KEYWORD1
 SatelliteSurfaceVariable	KEYWORD1
-SatelliteSurfaceKeyState	KEYWORD1
+SatelliteSubscriptionConfig	KEYWORD1
+SatelliteLayout	KEYWORD1
+SatelliteLayoutControl	KEYWORD1
+SatelliteStylePreset	KEYWORD1
+SatelliteLedsMode	KEYWORD1
 
 #######################################
 # Methods and Functions (KEYWORD2)
 #######################################
 
 begin	KEYWORD2
+loop	KEYWORD2
 getDeviceName	KEYWORD2
 getHostname	KEYWORD2
 getTargetHostname	KEYWORD2
 getTargetPort	KEYWORD2
 setTargetHostname	KEYWORD2
 setTargetPort	KEYWORD2
+setTarget	KEYWORD2
 getCompanionVersion	KEYWORD2
 getSatelliteApiVersion	KEYWORD2
+getConnectionState	KEYWORD2
 isConnected	KEYWORD2
 isReady	KEYWORD2
+hasFeature	KEYWORD2
 supportsSubscriptions	KEYWORD2
 supportsNonsquareButtons	KEYWORD2
+supportsRotaryAmount	KEYWORD2
 getCapsBitmapFormats	KEYWORD2
-addSubscription	KEYWORD2
-removeSubscription	KEYWORD2
-subscriptionAction	KEYWORD2
-setOnSubscriptionState	KEYWORD2
-handleMessage	KEYWORD2
+setOnConnectionStateChange	KEYWORD2
+satelliteConnectionStateName	KEYWORD2
 getID	KEYWORD2
 getName	KEYWORD2
 getConfig	KEYWORD2
 getVariables	KEYWORD2
+getLocation	KEYWORD2
+setLocation	KEYWORD2
+isRegistered	KEYWORD2
+isActive	KEYWORD2
 buttonAction	KEYWORD2
+rotate	KEYWORD2
+controlAction	KEYWORD2
+rotateControl	KEYWORD2
+action	KEYWORD2
 setVariable	KEYWORD2
 pressPincodeKey	KEYWORD2
 reportFirmwareUpdateInfo	KEYWORD2
@@ -57,23 +79,18 @@ setOnBrightnessSet	KEYWORD2
 setOnVariableSet	KEYWORD2
 setOnLockedStateSet	KEYWORD2
 setOnDeviceConfig	KEYWORD2
-parseSatelliteKeyType	KEYWORD2
-parseSatelliteColor	KEYWORD2
+setOnRegistered	KEYWORD2
+setOnError	KEYWORD2
+setOnStateChange	KEYWORD2
+decode	KEYWORD2
+decodedLength	KEYWORD2
+isDataUrl	KEYWORD2
+mimeType	KEYWORD2
 
 #######################################
 # Constants (LITERAL1)
 #######################################
 
-DEFAULT_INSTANCE_NAME	LITERAL1
-DEFAULT_HOSTNAME	LITERAL1
-DEFAULT_PORT	LITERAL1
-SATELLITE_EVENTS	LITERAL1
-SATELLITE_SURFACE_EVENTS	LITERAL1
-SATELLITE_EVENT_READY	LITERAL1
-SATELLITE_EVENT_CONNECTED	LITERAL1
-SATELLITE_EVENT_PING_SENT	LITERAL1
-SATELLITE_EVENT_PONG_RECEIVED	LITERAL1
-SATELLITE_EVENT_DISCONNECTED	LITERAL1
 BUTTON	LITERAL1
 PAGEUP	LITERAL1
 PAGEDOWN	LITERAL1
@@ -89,3 +106,13 @@ PARTIAL	LITERAL1
 FULL	LITERAL1
 VARIABLE_INPUT	LITERAL1
 VARIABLE_OUTPUT	LITERAL1
+LOOP	LITERAL1
+IMMEDIATE	LITERAL1
+IDLE	LITERAL1
+CONNECTING	LITERAL1
+NEGOTIATING	LITERAL1
+READY	LITERAL1
+REJECTED	LITERAL1
+WAITING	LITERAL1
+FULL_RING	LITERAL1
+SIMPLE	LITERAL1

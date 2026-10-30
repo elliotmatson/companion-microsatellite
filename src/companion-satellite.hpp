@@ -2,535 +2,386 @@
  * @file companion-satellite.hpp
  * @brief Companion Satellite API library for ESP32 microcontrollers
  * @author Elliot Matson
- * @version 0.0.1
- * @date November 2025
+ * @version 0.1.0
  *
- * This library provides functionality to connect ESP32-based devices to Bitfocus Companion
- * via the Companion Satellite API. It enables the creation of virtual surfaces with buttons
- * and variables that can interact with Companion software.
+ * Connects ESP32 based devices to Bitfocus Companion via the Companion Satellite API,
+ * as virtual surfaces (SatelliteSurface) and/or button subscriptions
+ * (SatelliteSubscription).
  *
- * Features:
- * - TCP connection to Companion with automatic reconnection
- * - REST API for configuration via web interface
- * - mDNS service discovery
- * - Multiple virtual surfaces, plus standalone button subscriptions
- * - Button press/release, rotary encoder, and page-navigation support
- * - Variable input/output support with base64 encoding
- * - Pincode input support
- * - Bitmap format negotiation (rgb/png/webp)
- * - Thread-safe operations with mutex protection
- * - Persistent configuration storage
+ * Including this header gives you the whole public API.
+ *
+ * Threading: by default, every callback (key state, variables, connection state...)
+ * runs inside Satellite::loop(), so call that from your Arduino loop(). That keeps
+ * your drawing/LED code off the network task, and lets you use the same display or
+ * bus from loop() without locking. See SatelliteOptions::dispatch.
  */
 
 #ifndef COMPANION_SATELLITE_HPP
 #define COMPANION_SATELLITE_HPP
 
-// ---------------------------------------------------------------------------
-// Includes
-// ---------------------------------------------------------------------------
-
 #include <Arduino.h>
+#include <deque>
 #include <functional>
 #include <list>
+#include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 #include <Preferences.h>
 #include <Ticker.h>
-#include "esp_event.h"
 
-// _server/_client are only ever used as pointers in this header; the full
-// ESPAsyncWebServer.h/AsyncTCP.h definitions are only needed by
-// companion-satellite.cpp, which includes them directly.
+#include "companion-satellite-types.hpp"
+#include "companion-surface.hpp"
+#include "companion-subscription.hpp"
+#include "satellite-protocol.hpp"
+
+// Only used as pointers here; companion-satellite.cpp includes the real headers.
 class AsyncWebServer;
 class AsyncClient;
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/** @brief Default instance name for the satellite device */
-constexpr const char *DEFAULT_INSTANCE_NAME = "Companion Microsatellite";
-
-/** @brief Default hostname for the satellite device */
-constexpr const char *DEFAULT_HOSTNAME = "microsatellite";
-
-/** @brief Default API port for the satellite web server */
-constexpr uint16_t DEFAULT_PORT = 9999;
-
-/** @brief ESP event base for satellite events */
-ESP_EVENT_DECLARE_BASE(SATELLITE_EVENTS);
-
-class SatelliteSurface; // forward declaration (see note below, above the companion-surface.hpp include)
-
-// ---------------------------------------------------------------------------
-// Enums
-// ---------------------------------------------------------------------------
+struct pbuf;
 
 /**
- * @brief Type of a key/button/control location
- *
- * Shared by KEY-STATE (surfaces) and SUB-STATE (subscriptions) - both
- * messages report the same set of location types.
+ * @brief Where callbacks run
  */
-enum class SatelliteSurfaceKeyType
+enum class SatelliteDispatchMode
 {
-    BUTTON,   /**< Standard button key */
-    PAGEUP,   /**< Page up key */
-    PAGEDOWN, /**< Page down key */
-    PAGENUM,  /**< Page number key */
+    /**
+     * Callbacks run inside Satellite::loop(), on whichever task calls it (usually the
+     * Arduino loop task). Received updates are queued until then, and repeated updates
+     * to the same key are merged so a slow loop() only sees the latest state.
+     */
+    LOOP,
+
+    /**
+     * Callbacks run immediately on the AsyncTCP network task. Lowest latency, but keep
+     * them short and non-blocking, and make anything they share with other tasks
+     * thread-safe. loop() does not need to be called.
+     */
+    IMMEDIATE,
 };
 
 /**
- * @brief Action/direction shared by button presses and encoder rotation
- *
- * PRESSED/RELEASED are used for press-style actions (SatelliteSurface::buttonAction,
- * Satellite::subscriptionAction). RIGHT/LEFT are used for rotation direction
- * (SatelliteSurface::buttonAction rotate, Satellite::subscriptionAction rotate).
+ * @brief Options for Satellite::begin
  */
-enum class SatelliteAction
+struct SatelliteOptions
 {
-    PRESSED,
-    RELEASED,
-    RIGHT,
-    LEFT,
+    /** Where callbacks run - see SatelliteDispatchMode */
+    SatelliteDispatchMode dispatch = SatelliteDispatchMode::LOOP;
+
+    /** Serve the REST config API (GET/POST /api/host, /api/port, /api/config) on the API port */
+    bool webConfig = true;
+
+    /** Advertise this device over mDNS, so Companion can discover and configure it */
+    bool mdns = true;
+
+    /**
+     * The longest message that will be accepted, in bytes. Longer ones (eg. bitmaps
+     * bigger than you asked for) are skipped. A raw rgb bitmap of W x H pixels takes
+     * about W * H * 4 bytes, plus a couple of hundred for the rest of the message.
+     */
+    size_t maxLineLength = 32768;
+
+    /**
+     * In LOOP mode, the most received data to hold waiting for loop(), in bytes. Once the
+     * queue is within maxLineLength of this, receiving pauses (TCP flow control: Companion
+     * waits) until loop() catches up, so updates are only dropped if it's set below that.
+     */
+    size_t maxQueuedBytes = 65536;
+
+    /** Reconnect if nothing has been received from Companion for this long (Companion answers our PING every 2s) */
+    uint32_t keepaliveTimeoutMs = 6000;
 };
 
 /**
- * @brief Direction for surface page navigation (CHANGE-PAGE, API >= 1.10.0)
- */
-enum class SatellitePageDirection
-{
-    NEXT,
-    PREVIOUS,
-};
-
-// ---------------------------------------------------------------------------
-// Structs
-// ---------------------------------------------------------------------------
-
-/**
- * @brief RGB color structure
+ * @brief The connection to Companion
  *
- * Represents a color using red, green, and blue components.
- * Each component ranges from 0 (no intensity) to 255 (full intensity).
- */
-struct color
-{
-    uint8_t r; /**< Red component (0-255) */
-    uint8_t g; /**< Green component (0-255) */
-    uint8_t b; /**< Blue component (0-255) */
-};
-
-// ---------------------------------------------------------------------------
-// Functions
-// ---------------------------------------------------------------------------
-
-/**
- * @brief Parse a KEY-STATE/SUB-STATE TYPE value
- * @return The matching SatelliteSurfaceKeyType, defaulting to BUTTON for unknown or missing values
- */
-SatelliteSurfaceKeyType parseSatelliteKeyType(const String &typeStr);
-
-/**
- * @brief Parse a hex (#RRGGBB) or css rgb(r,g,b) color string
- * @return std::nullopt if the value doesn't match either supported format
- */
-std::optional<color> parseSatelliteColor(const String &value);
-
-// companion-surface.hpp depends on the enums/structs declared above (color,
-// SatelliteSurfaceKeyType, SatelliteAction, SatellitePageDirection), so it must be
-// included after them rather than grouped with the includes at the top of this file.
-// Pulling it in here also means consumers get the whole public API (Satellite +
-// SatelliteSurface) from a single `#include "companion-satellite.hpp"`.
-#include "companion-surface.hpp"
-
-// ---------------------------------------------------------------------------
-// Classes
-// ---------------------------------------------------------------------------
-
-/**
- * @brief Main satellite class for connecting to Bitfocus Companion
- *
- * The Satellite class manages the connection to Companion software via TCP socket
- * and provides a REST API for configuration. It can host multiple SatelliteSurface
- * objects that represent virtual control surfaces.
+ * Owns the TCP connection, reconnects as needed, and registers every SatelliteSurface
+ * and SatelliteSubscription created against it each time the connection becomes ready.
  */
 class Satellite
 {
 public:
+    /** @brief Default name shown in Companion */
+    static constexpr const char *kDefaultDeviceName = "Companion Microsatellite";
+
+    /** @brief Default mDNS hostname prefix */
+    static constexpr const char *kDefaultHostname = "microsatellite";
+
+    /** @brief Default port for the REST config API */
+    static constexpr uint16_t kDefaultApiPort = 9999;
+
+    /** @brief Companion's Satellite API TCP port */
+    static constexpr uint16_t kCompanionPort = 16622;
+
     /**
-     * @brief State of a single subscribed control (SUB-STATE), see addSubscription
+     * @brief Construct a new Satellite
+     * @param deviceName Name of the device (displayed in Companion). The chip id is appended
+     * @param apiPort Port for the REST config API
      */
-    struct SubscriptionState
+    Satellite(const char *deviceName = kDefaultDeviceName, uint16_t apiPort = kDefaultApiPort);
+    ~Satellite();
+
+    Satellite(const Satellite &) = delete;
+    Satellite &operator=(const Satellite &) = delete;
+
+    /**
+     * @brief Start the satellite: load the saved target, start the config API and mDNS, and connect
+     *
+     * Call after the network (WiFi/Ethernet) is up.
+     */
+    void begin(const SatelliteOptions &options = SatelliteOptions{});
+
+    /**
+     * @brief Run queued callbacks
+     *
+     * Call regularly (eg. from your Arduino loop()) when using SatelliteDispatchMode::LOOP.
+     */
+    void loop();
+
+    /** @brief The device name, with the chip id */
+    String getDeviceName() const { return _deviceName; }
+
+    /** @brief The mDNS hostname */
+    String getHostname() const { return _hostname; }
+
+    /** @brief The Companion host to connect to */
+    String getTargetHostname() const;
+
+    /** @brief The Companion port to connect to */
+    uint16_t getTargetPort() const;
+
+    /** @brief Set (and save) the Companion host, and reconnect */
+    void setTargetHostname(const String &hostname);
+
+    /** @brief Set (and save) the Companion port, and reconnect */
+    void setTargetPort(uint16_t port);
+
+    /** @brief Set (and save) the Companion host and port together, and reconnect once */
+    void setTarget(const String &hostname, uint16_t port = kCompanionPort);
+
+    /** @brief Companion's version, from BEGIN, or "unknown" */
+    String getCompanionVersion() const;
+
+    /** @brief Companion's Satellite API version, from BEGIN, or "unknown" */
+    String getSatelliteApiVersion() const;
+
+    /** @brief The state of the connection */
+    SatelliteConnectionState getConnectionState() const;
+
+    /** @brief Whether the TCP connection is up (negotiation may still be in progress) */
+    bool isConnected() const;
+
+    /** @brief Whether BEGIN and CAPS have been received and the connection is usable */
+    bool isReady() const { return getConnectionState() == SatelliteConnectionState::READY; }
+
+    /**
+     * @brief Whether a feature is available on the current connection
+     *
+     * Combines the API version from BEGIN with the flags from CAPS. Always false until ready.
+     */
+    bool hasFeature(SatelliteFeature feature) const;
+
+    /** @brief Whether button subscriptions are enabled (they can be turned off in Companion's settings) */
+    bool supportsSubscriptions() const { return hasFeature(SatelliteFeature::Subscriptions); }
+
+    /** @brief Whether non-square bitmaps are supported */
+    bool supportsNonsquareButtons() const { return hasFeature(SatelliteFeature::NonSquareBitmaps); }
+
+    /** @brief Whether a rotation can carry a step count (otherwise multi-step rotations are sent as single steps) */
+    bool supportsRotaryAmount() const { return hasFeature(SatelliteFeature::RotaryAmount); }
+
+    /** @brief Bitmap formats advertised in CAPS (eg rgb/png/webp) */
+    std::vector<String> getCapsBitmapFormats() const;
+
+    /**
+     * @brief Set a callback for connection state changes
+     *
+     * Use READY to (re)send anything Companion needs after a reconnect. Surfaces and
+     * subscriptions are re-registered automatically.
+     */
+    void setOnConnectionStateChange(std::function<void(SatelliteConnectionState)> callback) { _onConnectionStateChange = std::move(callback); }
+
+private:
+    friend class SatelliteSurface;
+    friend class SatelliteSubscription;
+
+    using Message = satellite_protocol::Message;
+
+    /** @brief What a queued item is for */
+    enum class TargetKind : uint8_t
     {
-        String subId;                                                   /**< Subscription id, as passed to addSubscription */
-        SatelliteSurfaceKeyType type = SatelliteSurfaceKeyType::BUTTON; /**< Type of the location */
-        std::optional<String> location;                                 /**< Absolute location, "page/row/column" */
-        std::optional<String> bitmap;                                   /**< Optional base64-encoded bitmap */
-        std::optional<color> keyColor;                                  /**< Optional key color */
-        std::optional<color> textColor;                                 /**< Optional text color */
-        std::optional<String> text;                                     /**< Optional text label */
-        std::optional<uint8_t> fontSize;                                /**< Optional font size */
-        std::optional<bool> pressed;                                    /**< Optional pressed state */
+        CONNECTION,
+        SURFACE,
+        SUBSCRIPTION,
+    };
+
+    struct QueuedItem
+    {
+        TargetKind kind = TargetKind::CONNECTION;
+        SatelliteConnectionState state = SatelliteConnectionState::IDLE; /**< For CONNECTION items */
+        std::string target;                                              /**< Device id or subscription id */
+        std::string coalesceKey;                                         /**< Non-empty when a newer item may replace this one */
+        std::unique_ptr<Message> message;
+        size_t bytes = 0;
     };
 
     /**
-     * @brief Construct a new Satellite object
-     * @param deviceName Name of the device (displayed in Companion)
-     * @param apiPort Port number for the configuration web server
+     * A client that is no longer in use. AsyncTCP may still be inside one of its callbacks
+     * (eg. we closed it from its own onData), or have a DNS lookup in flight for it, so it
+     * is only deleted later, from the timer task, once that can no longer be the case.
      */
-    Satellite(const char *deviceName = DEFAULT_INSTANCE_NAME, uint16_t apiPort = DEFAULT_PORT);
-
-    /**
-     * @brief Destroy the Satellite object
-     *
-     * Disconnects from Companion and cleans up resources.
-     */
-    ~Satellite();
-
-    /**
-     * @brief Initialize the satellite
-     *
-     * Sets up the web server, mDNS, preferences, and attempts to connect to Companion.
-     * Must be called after WiFi is connected.
-     */
-    void begin();
-
-    /**
-     * @brief Get the device name
-     * @return String The device name with chip ID
-     */
-    String getDeviceName() const { return _deviceName; }
-
-    /**
-     * @brief Get the hostname for this device
-     * @return String The hostname used for mDNS
-     */
-    String getHostname() const { return _hostname; }
-
-    /**
-     * @brief Get the target Companion hostname
-     * @return String The hostname of the Companion server to connect to
-     */
-    String getTargetHostname() const { return lockedRead(_targetHostname); }
-
-    /**
-     * @brief Get the target Companion port
-     * @return uint16_t The port of the Companion server to connect to
-     */
-    uint16_t getTargetPort() const { return lockedRead(_targetPort); }
-
-    /**
-     * @brief Set the target Companion hostname
-     * @param hostname The hostname or IP address of the Companion server
-     *
-     * This will save the hostname to preferences and attempt to reconnect.
-     */
-    void setTargetHostname(const String &hostname)
+    struct RetiredClient
     {
-        ESP_LOGI("Satellite", "Setting target hostname: %s", hostname.c_str());
-        xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-        _targetHostname = hostname;
-        _apiVersionRejected = false;
-        xSemaphoreGiveRecursive(_mutex);
-        _prefs.putString("host", hostname);
-        connectToCompanion();
-    }
+        AsyncClient *client;
+        uint32_t retiredAt;
+        bool disposed;       /**< onDisconnect has fired, so AsyncTCP is done with it */
+        uint32_t disposedAt; /**< When it was disposed */
+    };
 
-    /**
-     * @brief Set the target Companion port
-     * @param port The port number of the Companion server
-     *
-     * This will save the port to preferences and attempt to reconnect.
-     */
-    void setTargetPort(uint16_t port)
+    /** @brief RAII holder for _mutex */
+    class Lock
     {
-        ESP_LOGI("Satellite", "Setting target port: %d", port);
-        xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-        _targetPort = port;
-        _apiVersionRejected = false;
-        xSemaphoreGiveRecursive(_mutex);
-        _prefs.putUInt("port", port);
-        connectToCompanion();
-    }
+    public:
+        explicit Lock(SemaphoreHandle_t mutex)
+            : _mutex(mutex) { xSemaphoreTakeRecursive(_mutex, portMAX_DELAY); }
+        ~Lock() { xSemaphoreGiveRecursive(_mutex); }
+        Lock(const Lock &) = delete;
+        Lock &operator=(const Lock &) = delete;
+
+    private:
+        SemaphoreHandle_t _mutex;
+    };
+
+    // --- connection (companion-satellite.cpp) ---
+    void connectToCompanion();
+    void retireClient();
+    void scheduleReconnect();
+    void tick();
+    void setState(SatelliteConnectionState state);
+    void onClientConnect(AsyncClient *client);
+    void onClientDisconnect(AsyncClient *client);
+    void sendAddDevice(SatelliteSurface &surface);
+    void retryUnansweredAddDevices(uint32_t now);
+    void onClientPacket(AsyncClient *client, pbuf *pb);
+    void onClientData(AsyncClient *client, const char *data, size_t length);
+    size_t receivePauseThreshold() const;
+    void resumeReceiving();
+    void dropHeldPackets();
+    bool handleLine(AsyncClient *client, std::string &&line);
+    void handleBegin(const Message &message);
+    void handleCaps(std::unique_ptr<Message> message);
+    void handleResponse(std::unique_ptr<Message> message);
+    void registerAll();
+    void resetRegistrations();
+    bool send(std::string &&line);
+    void flushTx();
+
+    // --- dispatch ---
+    void enqueue(QueuedItem &&item);
+    void drainQueue();
+    void purgeQueue(TargetKind kind, const String &target);
+    void dispatch(QueuedItem &item);
+    void dispatchToSurface(const std::string &deviceId, const Message &message);
+    void dispatchToSubscription(const std::string &subId, const Message &message);
+
+    // --- surfaces and subscriptions ---
+    bool add(SatelliteSurface &surface);
+    void remove(SatelliteSurface &surface);
+    void add(SatelliteSubscription &subscription);
+    void remove(SatelliteSubscription &subscription);
+    void sendAddSubscription(SatelliteSubscription &subscription);
+    bool isBitmapFormatAdvertised(const String &format) const;
+
+    /** @brief Add BITMAP_FORMAT if one was requested and Companion supports it (shared by ADD-DEVICE and ADD-SUB) */
+    void appendBitmapFormat(satellite_protocol::MessageBuilder &command, const std::optional<String> &format) const;
 
     /**
-     * @brief Get the Companion software version
-     * @return String The version of the connected Companion software
+     * @brief Split a rotation into the DIRECTION values to send (shared by KEY-ROTATE and SUB-ROTATE)
      *
-     * Returns "unknown" if not connected or version information hasn't been received yet.
+     * With ROTARY_AMOUNT the whole rotation goes in one message (in chunks of up to Companion's
+     * limit), otherwise each step is its own +1/-1 message. Never 0, which Companion reads as a
+     * counter-clockwise step for compatibility.
      */
-    String getCompanionVersion() const { return lockedRead(_companionVersion); }
+    std::vector<int> rotationDirections(int steps) const;
 
-    /**
-     * @brief Get the Satellite API version
-     * @return String The version of the Satellite API being used
-     *
-     * Returns "unknown" if not connected or version information hasn't been received yet.
-     */
-    String getSatelliteApiVersion() const { return lockedRead(_satelliteApiVersion); }
+    // --- config API and mDNS (companion-satellite-web.cpp) ---
 
-    /**
-     * @brief Whether the TCP socket is currently connected
-     *
-     * This indicates transport connectivity only. Protocol negotiation may
-     * still be in progress.
-     */
-    bool isConnected() const { return lockedRead(_isConnected); }
-
-    /**
-     * @brief Whether the satellite is fully ready for protocol operations
-     *
-     * Ready means connected and successful BEGIN/ApiVersion negotiation has
-     * completed.
-     */
-    bool isReady() const
+    /** @brief HTTP status and plain-text body to answer a config API write with */
+    struct ConfigApiResponse
     {
-        xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-        bool ready = _isConnected && _apiNegotiated && _satelliteApiVersionValid && !_apiVersionRejected;
-        xSemaphoreGiveRecursive(_mutex);
-        return ready;
-    }
+        int status;
+        const char *message;
+    };
 
     /**
-     * @brief Whether the server advertised button subscriptions support via CAPS
-     */
-    bool supportsSubscriptions() const { return lockedRead(_capsSubscriptions); }
-
-    /**
-     * @brief Whether the server advertised non-square button support via CAPS
-     */
-    bool supportsNonsquareButtons() const { return lockedRead(_capsNonsquare); }
-
-    /**
-     * @brief Bitmap formats advertised by the server via CAPS (eg rgb/png/webp)
+     * @brief Apply a POST to /api/host, /api/port or /api/config, and say how to answer it
      *
-     * Returns a copy, since the underlying list can be mutated by the network
-     * task (eg. on reconnect) concurrently with the caller reading it.
+     * Kept apart from the web server routing (companion-satellite-web.cpp) so the host tests can drive it.
      */
-    std::vector<String> getCapsBitmapFormats() const { return lockedRead(_capsBitmapFormats); }
+    ConfigApiResponse handleConfigPost(const String &path, String body);
+
+    void beginWebConfig();
+    void endWebConfig();
+    void beginMdns();
+
+    void saveTarget();
+
+    String _deviceName;
+    String _hostname;
+    uint16_t _apiPort;
+
+    SatelliteOptions _options;
+    bool _begun = false;
 
     /**
-     * @brief Add a button subscription (API >= 1.10.0)
-     * @param subId Client-defined subscription id
-     * @param location Control location in page/row/column form, e.g. "1/2/3"
-     * @param bitmapSize Optional bitmap size hint
-     * @param bitmapFormat Optional negotiated bitmap format (rgb/png/webp)
-     * @param colors Optional simple style flag to request COLOR/TEXTCOLOR fields
-     * @param text Optional simple style flag to request TEXT field
-     * @param textStyle Optional simple style flag to request text style fields (eg FONT_SIZE)
-     */
-    void addSubscription(const String &subId, const String &location, std::optional<uint16_t> bitmapSize = std::nullopt,
-                         std::optional<String> bitmapFormat = std::nullopt,
-                         std::optional<bool> colors = std::nullopt,
-                         std::optional<bool> text = std::nullopt,
-                         std::optional<bool> textStyle = std::nullopt);
-
-    /**
-     * @brief Remove a button subscription (API >= 1.10.0)
-     */
-    void removeSubscription(const String &subId);
-
-    /**
-     * @brief Press/release or rotate a subscribed control (API >= 1.10.0)
-     * @param action PRESSED/RELEASED sends SUB-PRESS; RIGHT/LEFT sends SUB-ROTATE
-     *               (RIGHT = forward, LEFT = backward)
-     */
-    void subscriptionAction(const String &subId, SatelliteAction action);
-
-    /**
-     * @brief Set callback for subscription state updates (SUB-STATE)
-     */
-    void setOnSubscriptionState(std::function<void(const SubscriptionState &)> callback) { onSubscriptionState = callback; }
-
-private:
-    /**
-     * Hard cap for buffered TCP input to avoid unbounded memory growth.
-     *
-     * A single KEY-STATE/SUB-STATE line can contain a base64-encoded bitmap.
-     * The default 72px RGB bitmap is 72*72*3 = 15552 raw bytes, which is
-     * ~20736 bytes base64-encoded. This cap must stay comfortably above that
-     * (with room for the surrounding fields) or bitmap-enabled surfaces will
-     * have their KEY-STATE lines dropped. If you configure larger bitmaps
-     * (eg. via a larger BITMAPS/BITMAP size), increase this accordingly:
-     * ceil(width * height * 3 * 4 / 3) + ~256 bytes of overhead.
-     */
-    static constexpr size_t MAX_RX_BUFFER_SIZE = 32768;
-
-    String _deviceName = DEFAULT_INSTANCE_NAME; /**< Device name with chip ID */
-    String _hostname = DEFAULT_HOSTNAME;        /**< mDNS hostname */
-    uint16_t _apiPort = DEFAULT_PORT;           /**< Web server port */
-    String _targetHostname = "";                /**< Companion server hostname */
-    uint16_t _targetPort = 0;                   /**< Companion server port */
-    String _companionVersion = "unknown";       /**< Companion version */
-    String _satelliteApiVersion = "unknown";    /**< Satellite API version */
-    uint16_t _satelliteApiMajor = 0;            /**< Parsed satellite API major version */
-    uint16_t _satelliteApiMinor = 0;            /**< Parsed satellite API minor version */
-    uint16_t _satelliteApiPatch = 0;            /**< Parsed satellite API patch version */
-    bool _satelliteApiVersionValid = false;     /**< True when ApiVersion was parsed successfully */
-    bool _apiNegotiated = false;                /**< True after BEGIN was received and validated */
-    bool _apiVersionRejected = false;           /**< True when server ApiVersion is below minimum */
-    bool _isConnected = false;                  /**< Connection status */
-    bool _capsSubscriptions = false;            /**< CAPS SUBSCRIPTIONS flag */
-    bool _capsNonsquare = false;                /**< CAPS NONSQUARE flag */
-    std::vector<String> _capsBitmapFormats;     /**< CAPS BITMAP_FORMATS list */
-
-    AsyncWebServer *_server = nullptr; /**< Web server for REST API */
-    AsyncClient *_client = nullptr;    /**< TCP client for Companion connection */
-
-    /**
-     * Recursive mutex guarding all satellite state that is written from the
-     * AsyncTCP callback context (connect/disconnect/receive) and read from
-     * application code (or vice versa): _client, connection/negotiation
-     * flags, CAPS state, negotiated version info, target host/port, and the
-     * registered surfaces list. Recursive so that call chains which already
-     * hold the lock (eg. receiveCallback locking around sendAddCommand,
-     * which locks again inside send()) don't self-deadlock.
+     * Recursive mutex guarding everything below that is shared between the network task,
+     * the timer task and application code. Recursive so call chains that already hold it
+     * (eg. registering surfaces while handling CAPS, which then sends) don't deadlock.
+     * Callbacks into application code are never made while holding it.
      */
     SemaphoreHandle_t _mutex = xSemaphoreCreateRecursiveMutex();
-    Preferences _prefs;       /**< Persistent storage for configuration */
-    Ticker _keepaliveTicker;  /**< Timer for keepalive pings */
-    Ticker _reconnectTicker;  /**< Timer for reconnection attempts */
-    String _rxBuffer;         /**< Buffered TCP input for line-oriented parsing (receiveCallback only, single-threaded) */
 
-    /**
-     * @brief Read a field's current value while holding _mutex
-     */
-    template <typename T>
-    T lockedRead(const T &field) const
-    {
-        xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
-        T copy = field;
-        xSemaphoreGiveRecursive(_mutex);
-        return copy;
-    }
+    /** Held while running callbacks, so they never run concurrently on two tasks */
+    SemaphoreHandle_t _dispatchMutex = xSemaphoreCreateRecursiveMutex();
 
-    struct ApiParam
-    {
-        std::optional<String> id = std::nullopt;
-        std::optional<String> val = std::nullopt;
-    }; /**< A single parsed API parameter (id/value pair) */
+    String _targetHostname;
+    uint16_t _targetPort = 0;
 
-    std::list<SatelliteSurface *> _surfaces;                            /**< List of registered surfaces */
-    std::function<void(const SubscriptionState &)> onSubscriptionState; /**< Callback for SUB-STATE updates */
+    SatelliteConnectionState _state = SatelliteConnectionState::IDLE;
+    String _companionVersion = "unknown";
+    String _apiVersionText = "unknown";
+    std::optional<satellite_protocol::ApiVersion> _apiVersion;
+    std::unique_ptr<Message> _caps; /**< The CAPS message, kept as its params point into it */
+    std::vector<String> _capsBitmapFormats;
 
-    /**
-     * @brief Disconnect from Companion server
-     *
-     * Closes the TCP connection and stops keepalive timer.
-     */
-    void disconnectFromCompanion();
+    AsyncClient *_client = nullptr;
+    std::vector<RetiredClient> _retiredClients;
+    std::string _txBuffer;
+    satellite_protocol::LineBuffer _rxBuffer{32768}; /**< Only used on the network task */
+    uint32_t _lastRxMs = 0;
+    uint32_t _lastPingMs = 0;
+    uint32_t _stateSinceMs = 0;
+    uint32_t _reconnectAtMs = 0;
+    uint32_t _reconnectDelayMs = 1000;
 
-    /**
-     * @brief Connect to Companion server
-     *
-     * Establishes TCP connection using stored hostname and port.
-     */
-    void connectToCompanion();
+    std::deque<QueuedItem> _queue;
+    size_t _queuedBytes = 0;
+    bool _rxPaused = false;           /**< Holding acks back so Companion stops sending until loop() catches up */
+    std::vector<pbuf *> _heldPackets; /**< Received while paused, acked by resumeReceiving() */
+    uint32_t _lastLoopMs = 0;
+    bool _loopWarningLogged = false;
+    uint32_t _droppedUpdates = 0;
 
-    /**
-     * @brief Arm the reconnect timer, unless reconnection is permanently disabled
-     *
-     * Used both when the transport disconnects after a successful connection,
-     * and when the initial (synchronous) AsyncClient::connect() call itself
-     * fails, which does not otherwise trigger onDisconnect.
-     */
-    void scheduleReconnect();
+    std::list<SatelliteSurface *> _surfaces;
+    std::list<SatelliteSubscription *> _subscriptions;
+    std::deque<String> _pendingAddSubs; /**< Subscription ids awaiting ADD-SUB OK/ERROR, in request order */
+    uint32_t _nextSubscriptionId = 1;
 
-    /**
-     * @brief Send a message to Companion
-     * @param message The message string to send
-     *
-     * Thread-safe method to send data over the TCP connection.
-     */
-    void send(const String &message);
+    AsyncWebServer *_server = nullptr;
+    Preferences _prefs;
+    Ticker _ticker;
 
-    /**
-     * @brief Callback for receiving data from Companion
-     * @param arg User argument (unused)
-     * @param client The AsyncClient instance
-     * @param data Pointer to received data
-     * @param len Length of received data
-     */
-    void receiveCallback(void *arg, AsyncClient *client, void *data, size_t len);
-
-    /**
-     * @brief Send an ADD-DEVICE command for a surface
-     * @param surface Reference to the surface to add
-     */
-    void sendAddCommand(SatelliteSurface &surface);
-
-    /**
-     * @brief Add a surface to this satellite
-     * @param surface Reference to the surface to add
-     * @return bool True if successfully added, false if ID already exists
-     */
-    bool add(SatelliteSurface &surface);
-
-    /**
-     * @brief Remove a surface from this satellite
-     * @param surface Reference to the surface to remove
-     */
-    void remove(SatelliteSurface &surface);
-
-    /**
-     * @brief Parse all KEY=VALUE tokens out of a Satellite API message line in a single pass
-     *
-     * Handles quoted and unquoted values. Any leading text that isn't part of
-     * a KEY=VALUE token (eg. the leading command name) is skipped. Values are
-     * left encoded as received; use findApiParam's decodeBase64 to decode a
-     * specific field on demand.
-     * @param data Full message line (or the parameter portion of one)
-     * @return std::vector<ApiParam> All tokens found, in order of appearance
-     */
-    std::vector<ApiParam> tokenizeApiParams(const String &data) const;
-
-    /**
-     * @brief Look up a single field by name within a previously tokenized message
-     * @param tokens Tokens produced by tokenizeApiParams
-     * @param id Token name to search for
-     * @param decodeBase64 Whether to base64-decode the extracted value
-     * @return ApiParam Parsed token id/value pair when present
-     */
-    ApiParam findApiParam(const std::vector<ApiParam> &tokens, const char *id, bool decodeBase64 = false) const;
-
-    /**
-     * @brief Convenience overload for String token ids
-     */
-    ApiParam findApiParam(const std::vector<ApiParam> &tokens, const String &id, bool decodeBase64 = false) const { return findApiParam(tokens, id.c_str(), decodeBase64); }
-
-    /**
-     * @brief Append a BITMAP_FORMAT="..." param to a command if valid and advertised by CAPS
-     *
-     * Shared by ADD-DEVICE and ADD-SUB. Silently omits the parameter (Companion
-     * defaults to rgb) if the format is unsafe or wasn't advertised in CAPS.
-     * @param command Command string to append to
-     * @param commandName Command name used in log messages (eg. "ADD-DEVICE")
-     * @param requestedFormat Requested bitmap format (rgb/png/webp)
-     */
-    void appendBitmapFormatParam(String &command, const char *commandName, const String &requestedFormat) const;
-
-    /**
-     * @brief Log a warning if a requested square bitmap size likely won't fit in MAX_RX_BUFFER_SIZE
-     *
-     * Shared by ADD-DEVICE and ADD-SUB. This is advisory only - it doesn't stop the
-     * request from being sent, since the actual limit depends on how MAX_RX_BUFFER_SIZE
-     * is configured.
-     * @param commandName Command name used in the log message (eg. "ADD-DEVICE")
-     * @param bitmapSize Requested square bitmap size in pixels
-     */
-    void warnIfBitmapSizeTooLarge(const char *commandName, uint16_t bitmapSize) const;
-
-    /**
-     * @brief Check negotiated ApiVersion against a minimum version
-     * @param major Minimum required major version
-     * @param minor Minimum required minor version
-     * @param patch Minimum required patch version
-     * @return true when parsed ApiVersion is valid and >= requested minimum
-     */
-    bool isApiVersionAtLeast(uint16_t major, uint16_t minor, uint16_t patch = 0) const;
-
-    friend class SatelliteSurface; /**< Allow SatelliteSurface to access private members */
+    std::function<void(SatelliteConnectionState)> _onConnectionStateChange;
 };
 
 #endif // COMPANION_SATELLITE_HPP

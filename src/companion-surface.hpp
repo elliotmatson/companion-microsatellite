@@ -1,86 +1,42 @@
 /**
  * @file companion-surface.hpp
- * @brief Satellite surface implementation for Companion Satellite API
- * @author Elliot Matson
- * @version 0.0.1
- * @date November 2025
- *
- * This file contains the satellite surface implementation that handles
- * communication between ESP32 devices and Bitfocus Companion via the
- * Satellite API. It provides virtual control surfaces with buttons,
- * variables, and callback support for interactive functionality.
- *
- * Features:
- * - Virtual control surfaces with configurable layouts
- * - Button state management and callbacks
- * - Variable input/output with base64 encoding
- * - Brightness control support
- * - Pincode input functionality
- * - Lock state management
- * - Color and bitmap support for enhanced UI
- * - Page navigation and firmware update notification
- * - Custom config fields with runtime updates via DEVICE-CONFIG
+ * @brief A virtual control surface registered with Companion (ADD-DEVICE)
  */
 
 #ifndef COMPANION_SURFACE_HPP
 #define COMPANION_SURFACE_HPP
 
-// ---------------------------------------------------------------------------
-// Includes
-// ---------------------------------------------------------------------------
-
 #include <Arduino.h>
 #include <functional>
 #include <optional>
+#include <string>
 #include <vector>
-#include "esp_event.h"
-#include "companion-satellite.hpp"
 
-class Satellite; // forward declaration (see matching note in companion-satellite.hpp)
+#include "companion-satellite-types.hpp"
 
-/** @brief ESP event base for satellite surface events */
-ESP_EVENT_DECLARE_BASE(SATELLITE_SURFACE_EVENTS);
+class Satellite;
 
 // ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
 
 /**
- * @brief Satellite event types
- *
- * These events are posted when various satellite operations occur. The arg
- * is a pointer to the satellite instance that triggered the event.
- */
-enum
-{
-    SATELLITE_EVENT_READY,         /**< Satellite is initialized and ready */
-    SATELLITE_EVENT_CONNECTED,     /**< Connected to Companion */
-    SATELLITE_EVENT_PING_SENT,     /**< Keepalive ping sent to Companion */
-    SATELLITE_EVENT_PONG_RECEIVED, /**< Keepalive pong received from Companion */
-    SATELLITE_EVENT_DISCONNECTED   /**< Disconnected from Companion */
-};
-
-/**
  * @brief Pincode support levels for satellite surfaces
- *
- * Defines the level of pincode functionality supported by a surface.
  */
 enum class SatelliteSurfacePincodeSupport
 {
-    NONE,    /**< No pincode support */
-    PARTIAL, /**< Partial pincode support */
-    FULL     /**< Full pincode support */
+    NONE,    /**< Companion draws the pincode screen on the surface's keys itself */
+    PARTIAL, /**< The surface shows the locked state itself, but the pincode is entered elsewhere */
+    FULL     /**< The surface shows the locked state and lets the user enter the pincode (pressPincodeKey) */
 };
 
 /**
- * @brief Variable types for satellite surfaces
- *
- * Defines whether a variable is for input or output purposes.
+ * @brief Direction of a surface variable
  */
 enum class SatelliteSurfaceVariableType
 {
-    VARIABLE_INPUT, /**< Input variable (can be set from Companion) */
-    VARIABLE_OUTPUT /**< Output variable (can be read by Companion) */
+    VARIABLE_INPUT, /**< A value this device produces and sends to Companion with setVariable() */
+    VARIABLE_OUTPUT /**< A value Companion produces and sends to this device (setOnVariableSet) */
 };
 
 // ---------------------------------------------------------------------------
@@ -88,84 +44,66 @@ enum class SatelliteSurfaceVariableType
 // ---------------------------------------------------------------------------
 
 /**
- * @brief Configuration structure for satellite surfaces
- *
- * Contains all configuration options for a satellite surface including
- * layout, capabilities, and feature support.
+ * @brief Configuration of a surface
  */
 struct SatelliteSurfaceConfig
 {
-    uint8_t totalKeys = 32;                                                               /**< Total number of keys on the surface */
-    uint8_t keysPerRow = 8;                                                               /**< Number of keys per row */
-    bool sendColors = true;                                                               /**< Whether to send color information */
-    bool sendText = true;                                                                 /**< Whether to send text labels */
-    bool sendTextStyle = false;                                                           /**< Whether to send text styling */
+    uint16_t totalKeys = 32;                                                              /**< Total number of keys on the surface (simple grid) */
+    uint16_t keysPerRow = 8;                                                              /**< Number of keys per row (simple grid) */
+    bool sendColors = true;                                                               /**< Whether to send color information (simple grid) */
+    bool sendText = true;                                                                 /**< Whether to send text labels (simple grid) */
+    bool sendTextStyle = false;                                                           /**< Whether to send text styling (simple grid) */
     bool supportsBrightness = false;                                                      /**< Whether brightness control is supported */
     SatelliteSurfacePincodeSupport pincodeSupport = SatelliteSurfacePincodeSupport::NONE; /**< Level of pincode support */
     std::optional<String> configFieldsJson = std::nullopt;                                /**< Optional JSON array of CONFIG_FIELDS definitions */
 
     /**
-     * Enables device-initiated page up/down navigation (CHANGE-PAGE messages) for this
-     * surface. Set to the label Companion should show on the "allow this device to
-     * change pages" checkbox in the surface settings panel. CAN_CHANGE_PAGE is a label
-     * string in the protocol, not a boolean - its mere presence enables the feature, so
-     * leave this unset (nullopt) to omit CAN_CHANGE_PAGE entirely and disable page
-     * changes from this device.
+     * Enables device-initiated page up/down navigation (CHANGE-PAGE). Set to the label
+     * Companion should show on the "allow this device to change pages" checkbox in the
+     * surface settings. Leave unset to disable page changes from this device.
      */
     std::optional<String> canChangePageLabel = std::nullopt;
 
     /**
-     * Requested square bitmap size in pixels for this surface's KEY-STATE BITMAP field.
-     * Leave unset (nullopt) to disable bitmaps entirely (sends BITMAPS=false). Any set
-     * value - including 0 - is sent through as-is; per the protocol, 0 also disables
-     * bitmaps, while any positive value requests that pixel size. Larger bitmaps need a
-     * correspondingly larger MAX_RX_BUFFER_SIZE (see companion-satellite.hpp) - a warning
-     * is logged if the requested size looks like it won't fit.
+     * Requested square bitmap size in pixels for each key (simple grid). Leave unset to
+     * disable bitmaps. Values below 5 are treated by Companion as its 72px default. Make
+     * sure SatelliteOptions::maxLineLength is big enough (about size * size * 4 bytes).
      */
     std::optional<uint16_t> bitmapSize = std::nullopt;
 
     /**
-     * Bitmap encoding to request for this surface's KEY-STATE BITMAP field (rgb/png/webp).
-     * Only used when bitmapSize is set. Falls back to rgb if unset, or if the requested
-     * format was not advertised by the server's CAPS BITMAP_FORMATS list.
+     * Bitmap encoding to request (rgb/png/webp). Falls back to rgb if unset, or if
+     * Companion did not advertise it. Applies to both simple grids and layouts.
      */
     std::optional<String> bitmapFormat = std::nullopt;
+
+    /**
+     * Describe each control individually instead of a simple grid (LAYOUT_MANIFEST).
+     * When set, totalKeys, keysPerRow, sendColors, sendText, sendTextStyle and bitmapSize
+     * are ignored - the layout's style presets say what each control receives.
+     */
+    std::optional<SatelliteLayout> layout = std::nullopt;
 };
 
 /**
- * @brief Structure representing a satellite surface variable
- *
- * Contains metadata about a variable associated with a surface.
+ * @brief A variable attached to a surface
  */
 struct SatelliteSurfaceVariable
 {
     String id;                         /**< Unique identifier for the variable */
-    SatelliteSurfaceVariableType type; /**< Whether this is an input or output variable */
-    String name;                       /**< Display name of the variable */
+    SatelliteSurfaceVariableType type; /**< Input (device -> Companion) or output (Companion -> device) */
+    String name;                       /**< Display name */
     String description;                /**< Description of the variable's purpose */
 };
 
 /**
- * @brief Key state structure for satellite surfaces
- *
- * Contains all the visual and state information for a single key/button
- * on a satellite surface. Used for updating key appearance and behavior.
- *
- * color and SatelliteSurfaceKeyType are shared with Satellite::SubscriptionState
- * (see companion-satellite.hpp), since KEY-STATE and SUB-STATE report the same
- * kinds of data.
+ * @brief Pincode lock state, from LOCKED-STATE
  */
-struct SatelliteSurfaceKeyState
+struct SatelliteLockedState
 {
-    uint8_t index;                          /**< Key index */
-    SatelliteSurfaceKeyType type = SatelliteSurfaceKeyType::BUTTON; /**< Type of key */
-    std::optional<String> location;         /**< Optional absolute location, "page/row/column" */
-    std::optional<String> bitmap;           /**< Optional base64-encoded bitmap */
-    std::optional<color> keyColor;          /**< Optional key color */
-    std::optional<color> textColor;         /**< Optional text color */
-    std::optional<String> text;             /**< Optional text label */
-    std::optional<uint8_t> fontSize;        /**< Optional font size */
-    std::optional<bool> pressed;            /**< Optional pressed state */
+    bool locked = false;        /**< Whether the surface is locked */
+    uint8_t characterCount = 0; /**< How many pincode digits have been entered */
+    int16_t rotation = 0;       /**< The surface rotation configured in Companion: 0, 90, -90 or 180 (API >= 1.10.1) */
 };
 
 // ---------------------------------------------------------------------------
@@ -173,161 +111,149 @@ struct SatelliteSurfaceKeyState
 // ---------------------------------------------------------------------------
 
 /**
- * @brief Represents a virtual control surface with buttons and variables
+ * @brief A virtual control surface
  *
- * A SatelliteSurface provides a virtual control surface that can be used in Companion.
- * It contains buttons that can be pressed, released, or rotated, and variables that
- * can be set to display information.
+ * Shows up in Companion's Surfaces list once the satellite is connected, and is
+ * re-registered automatically after every reconnect.
  */
 class SatelliteSurface
 {
 public:
     /**
-     * @brief Construct a new Satellite Surface object
-     * @param satellite Reference to the parent Satellite object
+     * @brief Create a surface and register it with a satellite
+     * @param satellite The satellite to register with (must outlive this surface)
      * @param surfaceName Name of the surface (displayed in Companion)
      * @param config Configuration options for the surface
-     * @param variableList List of variables associated with this surface
+     * @param variableList Variables associated with this surface
      */
     SatelliteSurface(Satellite &satellite, const String &surfaceName, const SatelliteSurfaceConfig &config = SatelliteSurfaceConfig{}, const std::vector<SatelliteSurfaceVariable> &variableList = {});
 
-    /**
-     * @brief Destroy the Satellite Surface object
-     *
-     * Automatically removes the surface from the parent satellite.
-     */
+    /** @brief Removes the surface from the satellite (and from Companion) */
     ~SatelliteSurface();
 
-    /**
-     * @brief Handle incoming messages from Companion
-     * @param message The message string received from Companion
-     *
-     * Processes commands from Companion including KEY-STATE, KEYS-CLEAR,
-     * BRIGHTNESS, VARIABLE-VALUE, LOCKED-STATE, and DEVICE-CONFIG. Triggers
-     * appropriate callbacks based on the command type.
-     */
-    void handleMessage(const String &message);
+    SatelliteSurface(const SatelliteSurface &) = delete;
+    SatelliteSurface &operator=(const SatelliteSurface &) = delete;
 
-    /**
-     * @brief Get the unique ID of this surface
-     * @return String The surface ID (generated from surface name and device name)
-     */
+    /** @brief The unique ID of this surface (derived from its name and the device name) */
     const String &getID() const { return _surfaceID; }
 
-    /**
-     * @brief Get the display name of this surface
-     * @return String The surface name
-     */
+    /** @brief The display name of this surface */
     const String &getName() const { return _surfaceName; }
 
-    /**
-     * @brief Get the configuration of this surface
-     * @return SatelliteSurfaceConfig The surface configuration
-     */
+    /** @brief The configuration of this surface */
     const SatelliteSurfaceConfig &getConfig() const { return _config; }
 
-    /**
-     * @brief Get the list of variables associated with this surface
-     * @return std::vector<SatelliteSurfaceVariable> The list of surface variables
-     */
+    /** @brief The variables associated with this surface */
     const std::vector<SatelliteSurfaceVariable> &getVariables() const { return _variables; }
 
-    /**
-     * @brief Trigger a button action on this surface
-     * @param buttonIndex The index of the button (0-based)
-     * @param action The type of action (PRESSED, RELEASED, RIGHT, LEFT)
-     */
-    void buttonAction(uint8_t buttonIndex, SatelliteAction action);
+    /** @brief Whether Companion has accepted this surface on the current connection (ADD-DEVICE OK) */
+    bool isRegistered() const;
 
     /**
-     * @brief Set a variable value on this surface
-     * @param id The variable identifier
-     * @param value The value to set (will be base64 encoded automatically)
+     * @brief Press, release or rotate (a single step) a key
+     * @param buttonIndex The key index (for a layout, the position in its controls list)
+     */
+    void buttonAction(uint16_t buttonIndex, SatelliteAction action);
+
+    /**
+     * @brief Rotate an encoder by a number of steps
+     * @param buttonIndex The key index (for a layout, the position in its controls list)
+     * @param steps Positive for clockwise, negative for counter-clockwise
+     *
+     * Sent as one message when Companion supports rotation amounts (API >= 1.14.0),
+     * otherwise as one message per step.
+     */
+    void rotate(uint16_t buttonIndex, int steps);
+
+    /** @brief Press, release or rotate a control of a layout surface by its id */
+    void controlAction(const String &controlId, SatelliteAction action);
+
+    /** @brief Rotate a control of a layout surface by its id, see rotate() */
+    void rotateControl(const String &controlId, int steps);
+
+    /**
+     * @brief Set the value of an input variable
+     * @param id The variable id
+     * @param value The value (base64 encoded automatically)
      */
     void setVariable(const String &id, const String &value);
 
-    /**
-     * @brief Press a pincode key on this surface
-     * @param keyIndex The index of the pincode key to press (0-based)
-     */
+    /** @brief Press a pincode digit (0-9) */
     void pressPincodeKey(uint8_t keyIndex);
 
     /**
-     * @brief Report firmware update availability to Companion (API >= 1.10.0)
-     * @param updateUrl URL to firmware binary; empty string clears availability
+     * @brief Report firmware update availability to Companion
+     * @param updateUrl URL users can get the update from; empty clears it
      */
     void reportFirmwareUpdateInfo(const String &updateUrl);
 
-    /**
-     * @brief Request Companion to change page for this surface (API >= 1.10.0)
-     * @param direction SatellitePageDirection::NEXT or SatellitePageDirection::PREVIOUS
-     */
+    /** @brief Ask Companion to change this surface's page (needs config.canChangePageLabel) */
     void changePage(SatellitePageDirection direction);
 
     /**
-     * @brief Set callback for key state changes
-     * @param callback Function to call when a key's visual state changes
+     * @brief Called when a key's state changes (KEY-STATE)
      *
-     * The callback receives a SatelliteSurfaceKeyState object containing
-     * the key's index, type, and visual properties (color, text, bitmap, etc.).
+     * Bitmap and LED data in the state are only valid until the callback returns.
      */
-    void setOnKeyStateChange(std::function<void(SatelliteSurfaceKeyState)> callback) { onKeyStateChange = callback; }
+    void setOnKeyStateChange(std::function<void(const SatelliteControlState &)> callback) { onKeyStateChange = std::move(callback); }
 
-    /**
-     * @brief Set callback for keys clear event
-     * @param callback Function to call when all keys are cleared
-     *
-     * This callback is triggered when Companion sends a KEYS-CLEAR command.
-     */
-    void setOnKeysClear(std::function<void()> callback) { onKeysClear = callback; }
+    /** @brief Called when Companion clears all keys (KEYS-CLEAR) */
+    void setOnKeysClear(std::function<void()> callback) { onKeysClear = std::move(callback); }
 
-    /**
-     * @brief Set callback for brightness changes
-     * @param callback Function to call when brightness is changed
-     *
-     * The callback receives the new brightness value (0-100).
-     */
-    void setOnBrightnessSet(std::function<void(uint8_t)> callback) { onBrightnessSet = callback; }
+    /** @brief Called with the new brightness (0-100) */
+    void setOnBrightnessSet(std::function<void(uint8_t)> callback) { onBrightnessSet = std::move(callback); }
 
-    /**
-     * @brief Set callback for variable value changes
-     * @param callback Function to call when a variable value is set
-     *
-     * The callback receives the variable ID and the decoded value string.
-     * Values are automatically base64 decoded before calling the callback.
-     */
-    void setOnVariableSet(std::function<void(String, String)> callback) { onVariableSet = callback; }
+    /** @brief Called with the id and (decoded) value when Companion sets an output variable */
+    void setOnVariableSet(std::function<void(const String &, const String &)> callback) { onVariableSet = std::move(callback); }
 
-    /**
-     * @brief Set callback for lock state changes
-     * @param callback Function to call when the lock state changes
-     *
-     * The callback receives the lock state (true/false) and the number
-     * of characters entered in the pincode field.
-     */
-    void setOnLockedStateSet(std::function<void(bool, uint8_t)> callback) { onLockedStateSet = callback; }
+    /** @brief Called when the pincode lock state changes (needs pincodeSupport other than NONE) */
+    void setOnLockedStateSet(std::function<void(const SatelliteLockedState &)> callback) { onLockedStateSet = std::move(callback); }
 
-    /**
-     * @brief Set callback for DEVICE-CONFIG updates
-     * @param callback Function to call with decoded JSON CONFIG payload
-     */
-    void setOnDeviceConfig(std::function<void(const String &)> callback) { onDeviceConfig = callback; }
+    /** @brief Called with the decoded CONFIG JSON object whenever the config fields' values change */
+    void setOnDeviceConfig(std::function<void(const String &)> callback) { onDeviceConfig = std::move(callback); }
+
+    /** @brief Called each time Companion accepts the surface, ie. after every (re)connect */
+    void setOnRegistered(std::function<void()> callback) { onRegistered = std::move(callback); }
+
+    /** @brief Called when Companion rejects a command for this surface, with the command name and error message */
+    void setOnError(std::function<void(const String &, const String &)> callback) { onError = std::move(callback); }
 
 private:
-    Satellite *_satellite; /**< Pointer to parent satellite */
+    friend class Satellite;
 
-    // Callback functions for events
-    std::function<void(SatelliteSurfaceKeyState keyState)> onKeyStateChange;        /**< Callback triggered when a key's visual state changes */
-    std::function<void()> onKeysClear;                                              /**< Callback triggered when all keys are cleared */
-    std::function<void(uint8_t brightness)> onBrightnessSet;                        /**< Callback triggered when brightness is changed */
-    std::function<void(String variableID, String variableValue)> onVariableSet;     /**< Callback triggered when a variable value is set */
-    std::function<void(bool isLocked, uint8_t charactersEntered)> onLockedStateSet; /**< Callback triggered when lock state changes */
-    std::function<void(const String &configJson)> onDeviceConfig;                   /**< Callback triggered when DEVICE-CONFIG is received */
+    /** @brief Handle a message for this surface, on the dispatch task */
+    void handleMessage(const satellite_protocol::Message &message);
 
-    String _surfaceID;                                /**< Unique surface identifier */
-    String _surfaceName;                              /**< Display name of the surface */
-    SatelliteSurfaceConfig _config;                   /**< Configuration options for the surface */
-    std::vector<SatelliteSurfaceVariable> _variables; /**< List of variables associated with this surface */
+    /** @brief Build the ADD-DEVICE line. Called by Satellite with its mutex held */
+    std::string buildAddDeviceCommand() const;
+
+    /** @brief Build the LAYOUT_MANIFEST JSON */
+    String buildLayoutManifest() const;
+
+    /** @brief Send a KEY-PRESS/KEY-ROTATE, addressing the key by index or control id */
+    void sendKeyAction(const String *controlId, uint16_t index, SatelliteAction action);
+    void sendRotate(const String *controlId, uint16_t index, int steps);
+    bool resolveControl(uint16_t index, const String *&controlId) const;
+
+    Satellite *_satellite;
+
+    std::function<void(const SatelliteControlState &)> onKeyStateChange;
+    std::function<void()> onKeysClear;
+    std::function<void(uint8_t)> onBrightnessSet;
+    std::function<void(const String &, const String &)> onVariableSet;
+    std::function<void(const SatelliteLockedState &)> onLockedStateSet;
+    std::function<void(const String &)> onDeviceConfig;
+    std::function<void()> onRegistered;
+    std::function<void(const String &, const String &)> onError;
+
+    String _surfaceID;
+    String _surfaceName;
+    SatelliteSurfaceConfig _config;
+    std::vector<SatelliteSurfaceVariable> _variables;
+    bool _registered = false;       /**< Guarded by the satellite's mutex */
+    bool _addDevicePending = false; /**< ADD-DEVICE sent, no OK/ERROR yet (guarded by the satellite's mutex) */
+    uint32_t _addDeviceSentMs = 0;  /**< When it was last sent */
+    uint32_t _addDeviceRetryMs = 0; /**< How long to wait before sending it again */
 };
 
 #endif // COMPANION_SURFACE_HPP

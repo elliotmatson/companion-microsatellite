@@ -1,361 +1,555 @@
 /**
  * @file companion-surface.cpp
- * @brief Implementation of satellite surface functionality for Companion API
+ * @brief A virtual control surface registered with Companion (ADD-DEVICE)
  * @author Elliot Matson
- * @version 0.0.1
- * @date November 2025
- *
- * This file implements the satellite surface class that provides virtual
- * control surfaces for interaction with Bitfocus Companion. It handles
- * message processing, callback management, and communication protocols.
  */
 
-#include "companion-surface.hpp"
+#include "companion-satellite.hpp"
 
-#include <base64.h>
+#include <ArduinoJson.h>
 #include <MD5Builder.h>
 
-static bool parseApiBool(const String &value)
+using satellite_protocol::Message;
+using satellite_protocol::MessageBuilder;
+
+[[maybe_unused]] static const char *TAG = "SatelliteSurface";
+
+static String toString(std::string_view value)
 {
-    return value == "1" || value == "true";
+    String result;
+    result.concat(value.data(), value.size());
+    return result;
 }
 
-/**
- * @brief Validate a token value for direct inclusion in a quoted API parameter
- */
-static bool isSafeApiTokenValue(const String &value)
+static bool isValidControlId(const String &id)
 {
-    return value.length() > 0 && value.indexOf('"') == -1 && value.indexOf('\n') == -1 && value.indexOf('\r') == -1;
+    if (id.length() == 0)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < id.length(); i++)
+    {
+        char c = id[i];
+        if (!isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '/')
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
-ESP_EVENT_DEFINE_BASE(SATELLITE_SURFACE_EVENTS);
-
-/**
- * @brief Constructor for SatelliteSurface
- *
- * Creates a new surface with a unique ID generated from the surface name and device name.
- * The surface is automatically registered with the parent satellite.
- */
 SatelliteSurface::SatelliteSurface(Satellite &satellite, const String &surfaceName, const SatelliteSurfaceConfig &config, const std::vector<SatelliteSurfaceVariable> &variableList)
+    : _satellite(&satellite), _surfaceName(surfaceName), _config(config), _variables(variableList)
 {
-    ESP_LOGI("SatelliteSurface", "Creating surface: %s", surfaceName.c_str());
     MD5Builder md5;
     md5.begin();
     md5.add(surfaceName);
     md5.add(satellite.getDeviceName());
     md5.calculate();
-
     _surfaceID = "usat:" + md5.toString();
-    _surfaceName = surfaceName;
-    _config = config;
-    _variables = variableList;
-    ESP_LOGI("SatelliteSurface", "Surface ID: %s", _surfaceID.c_str());
-    _satellite = &satellite;
+
+    ESP_LOGI(TAG, "Surface %s has ID %s", surfaceName.c_str(), _surfaceID.c_str());
     _satellite->add(*this);
-    ESP_LOGI("SatelliteSurface", "Surface %s added to satellite", surfaceName.c_str());
 }
 
-/**
- * @brief Destructor for SatelliteSurface
- *
- * Automatically removes the surface from the parent satellite when destroyed.
- */
 SatelliteSurface::~SatelliteSurface()
 {
-    ESP_LOGI("SatelliteSurface", "Destroying surface: %s", _surfaceName.c_str());
-    if (_satellite)
-    {
-        _satellite->remove(*this);
-        ESP_LOGI("SatelliteSurface", "Surface %s removed from satellite", _surfaceName.c_str());
-    }
+    _satellite->remove(*this);
 }
 
-/**
- * @brief Handle incoming messages from Companion
- *
- * Parses and processes various command types received from Companion:
- * - KEY-STATE: Updates key visual state and triggers onKeyStateChange callback
- * - KEYS-CLEAR: Clears all keys and triggers onKeysClear callback
- * - BRIGHTNESS: Sets brightness level and triggers onBrightnessSet callback
- * - VARIABLE-VALUE: Updates variable value (base64 decoded) and triggers onVariableSet callback
- * - LOCKED-STATE: Updates lock state and triggers onLockedStateSet callback
- * - DEVICE-CONFIG: Decodes CONFIG_FIELDS values and triggers onDeviceConfig callback
- *
- * The function parses command parameters and extracts relevant values before
- * calling the appropriate callback functions if they are registered. See the
- * field comments on SatelliteSurfaceKeyState for what KEY-STATE can carry.
- */
-void SatelliteSurface::handleMessage(const String &message)
+bool SatelliteSurface::isRegistered() const
 {
-    ESP_LOGD("SatelliteSurface", "Handling message: %s", message.c_str());
+    Satellite::Lock lock(_satellite->_mutex);
+    return _registered;
+}
 
-    // Split message into command and parameters by spaces
-    int separator = message.indexOf(' ');
-    String command = separator == -1 ? message : message.substring(0, separator);
-    String params = separator == -1 ? "" : message.substring(separator + 1);
-    if (params.startsWith("OK"))
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+std::string SatelliteSurface::buildAddDeviceCommand() const
+{
+    MessageBuilder command("ADD-DEVICE");
+    command.deviceId(_surfaceID.c_str()).str("PRODUCT_NAME", _surfaceName.c_str());
+
+    if (_config.layout)
     {
-        ESP_LOGI("SatelliteSurface", "Received OK for command: %s", command.c_str());
-        return;
+        String manifest = buildLayoutManifest();
+        command.str("LAYOUT_MANIFEST", satellite_protocol::base64Encode(std::string_view(manifest.c_str(), manifest.length())));
     }
-    if (params.startsWith("ERROR"))
+    else
     {
-        ESP_LOGE("SatelliteSurface", "Error for command %s: %s", command.c_str(), params.c_str());
-        return;
-    }
-
-
-    // Handle different commands
-    if (command == "KEY-STATE")
-    {
-        // Handle key state update
-        ESP_LOGI("SatelliteSurface", "KEY-STATE command received: %s", params.c_str());
-        SatelliteSurfaceKeyState state;
-        // Tokenize once - a bitmap-carrying KEY-STATE line can be tens of KB,
-        // so re-scanning it from scratch for every field would be wasteful.
-        std::vector<Satellite::ApiParam> tokens = _satellite->tokenizeApiParams(params);
-        // extract key index
-        Satellite::ApiParam keyParam = _satellite->findApiParam(tokens, "KEY");
-        Satellite::ApiParam typeParam = _satellite->findApiParam(tokens, "TYPE");
-        if (keyParam.val.has_value())
+        command.num("KEYS_TOTAL", _config.totalKeys).num("KEYS_PER_ROW", _config.keysPerRow);
+        if (_config.bitmapSize)
         {
-            state.index = static_cast<uint8_t>(keyParam.val.value().toInt());
-            state.type = parseSatelliteKeyType(typeParam.val.value_or("BUTTON"));
-            // extract optional parameters
-            Satellite::ApiParam locationParam = _satellite->findApiParam(tokens, "LOCATION");
-            if (locationParam.val.has_value())
+            command.num("BITMAPS", *_config.bitmapSize);
+        }
+        else
+        {
+            command.boolean("BITMAPS", false);
+        }
+        command.boolean("COLORS", _config.sendColors).boolean("TEXT", _config.sendText).boolean("TEXT_STYLE", _config.sendTextStyle);
+    }
+
+    command.boolean("BRIGHTNESS", _config.supportsBrightness);
+
+    _satellite->appendBitmapFormat(command, _config.bitmapFormat);
+
+    if (_config.canChangePageLabel && _config.canChangePageLabel->length() > 0)
+    {
+        command.str("CAN_CHANGE_PAGE", _config.canChangePageLabel->c_str());
+    }
+
+    switch (_config.pincodeSupport)
+    {
+    case SatelliteSurfacePincodeSupport::PARTIAL:
+        command.raw("PINCODE_LOCK", "PARTIAL");
+        break;
+    case SatelliteSurfacePincodeSupport::FULL:
+        command.raw("PINCODE_LOCK", "FULL");
+        break;
+    case SatelliteSurfacePincodeSupport::NONE:
+        break;
+    }
+
+    if (!_variables.empty())
+    {
+        JsonDocument doc;
+        JsonArray array = doc.to<JsonArray>();
+        for (const SatelliteSurfaceVariable &variable : _variables)
+        {
+            JsonObject object = array.add<JsonObject>();
+            object["id"] = variable.id;
+            object["type"] = variable.type == SatelliteSurfaceVariableType::VARIABLE_INPUT ? "input" : "output";
+            object["name"] = variable.name;
+            object["description"] = variable.description;
+        }
+        // String rather than std::string, like the other JSON this library writes, so
+        // ArduinoJson's serializer is only compiled in once
+        String json;
+        serializeJson(doc, json);
+        command.str("VARIABLES", satellite_protocol::base64Encode(std::string_view(json.c_str(), json.length())));
+    }
+
+    if (_config.configFieldsJson && _config.configFieldsJson->length() > 0)
+    {
+        JsonDocument doc;
+        DeserializationError error = deserializeJson(doc, *_config.configFieldsJson);
+        if (error)
+        {
+            ESP_LOGW(TAG, "configFieldsJson is not valid JSON (%s), omitting it", error.c_str());
+        }
+        else if (!doc.is<JsonArray>())
+        {
+            ESP_LOGW(TAG, "configFieldsJson must be a JSON array, omitting it");
+        }
+        else
+        {
+            command.str("CONFIG_FIELDS", satellite_protocol::base64Encode(std::string_view(_config.configFieldsJson->c_str(), _config.configFieldsJson->length())));
+        }
+    }
+
+    if (!command.ok())
+    {
+        ESP_LOGE(TAG, "Surface %s can't be registered: its name or a label contains a newline", _surfaceName.c_str());
+        return {};
+    }
+    ESP_LOGI(TAG, "Registering surface %s", _surfaceID.c_str());
+    return command.finish();
+}
+
+String SatelliteSurface::buildLayoutManifest() const
+{
+    const SatelliteLayout &layout = *_config.layout;
+    bool nonSquare = _satellite->hasFeature(SatelliteFeature::NonSquareBitmaps);
+    bool leds = _satellite->hasFeature(SatelliteFeature::Leds);
+
+    JsonDocument doc;
+    JsonObject presets = doc["stylePresets"].to<JsonObject>();
+    bool hasDefault = false;
+
+    for (const SatelliteStylePreset &preset : layout.stylePresets)
+    {
+        if (preset.name.length() == 0)
+        {
+            ESP_LOGW(TAG, "Ignoring a style preset with no name");
+            continue;
+        }
+        hasDefault |= preset.name == "default";
+
+        JsonObject object = presets[preset.name].to<JsonObject>();
+        if (preset.bitmapWidth > 0 && preset.bitmapHeight > 0)
+        {
+            if (preset.bitmapWidth != preset.bitmapHeight && !nonSquare)
             {
-                state.location = locationParam.val.value();
+                ESP_LOGW(TAG, "Style preset '%s' asks for a non-square bitmap, which this Companion doesn't advertise", preset.name.c_str());
             }
-            Satellite::ApiParam bitmapParam = _satellite->findApiParam(tokens, "BITMAP");
-            if (bitmapParam.val.has_value())
+            object["bitmap"]["w"] = preset.bitmapWidth;
+            object["bitmap"]["h"] = preset.bitmapHeight;
+        }
+        if (preset.colors)
+        {
+            object["colors"] = "hex";
+        }
+        if (preset.text)
+        {
+            object["text"] = true;
+        }
+        if (preset.textStyle)
+        {
+            object["textStyle"] = true;
+        }
+        if (preset.ledSegments > 0)
+        {
+            if (!leds)
             {
-                state.bitmap = bitmapParam.val.value();
+                ESP_LOGW(TAG, "Style preset '%s' asks for LEDs, which need Satellite API 1.13.0 - omitting them", preset.name.c_str());
             }
-            Satellite::ApiParam colorParam = _satellite->findApiParam(tokens, "COLOR");
-            if (colorParam.val.has_value())
+            else
             {
-                state.keyColor = parseSatelliteColor(colorParam.val.value());
-            }
-            Satellite::ApiParam textColorParam = _satellite->findApiParam(tokens, "TEXTCOLOR");
-            if (textColorParam.val.has_value())
-            {
-                state.textColor = parseSatelliteColor(textColorParam.val.value());
-            }
-            Satellite::ApiParam textParam = _satellite->findApiParam(tokens, "TEXT", true);
-            if (textParam.val.has_value())
-            {
-                state.text = textParam.val.value();
-            }
-            Satellite::ApiParam fontSizeParam = _satellite->findApiParam(tokens, "FONT_SIZE");
-            if (fontSizeParam.val.has_value())
-            {
-                state.fontSize = static_cast<uint8_t>(fontSizeParam.val.value().toInt());
-            }
-            Satellite::ApiParam pressedParam = _satellite->findApiParam(tokens, "PRESSED");
-            if (pressedParam.val.has_value())
-            {
-                state.pressed = parseApiBool(pressedParam.val.value());
-            }
-            // call the onKeyStateChange callback if set
-            if (onKeyStateChange)
-            {
-                onKeyStateChange(state);
+                object["leds"]["segments"] = std::min<uint8_t>(preset.ledSegments, 200);
+                object["leds"]["mode"] = preset.ledsMode == SatelliteLedsMode::FULL_RING ? "full-ring" : "simple";
             }
         }
     }
-    else if (command == "KEYS-CLEAR")
+
+    if (!hasDefault)
     {
-        // Handle keys clear command
-        ESP_LOGI("SatelliteSurface", "KEYS-CLEAR command received: %s", params.c_str());
-        // call the onKeysClear callback if set
+        ESP_LOGW(TAG, "Layout has no \"default\" style preset, adding an empty one");
+        presets["default"].to<JsonObject>();
+    }
+
+    JsonObject controls = doc["controls"].to<JsonObject>();
+    for (const SatelliteLayoutControl &control : layout.controls)
+    {
+        if (!isValidControlId(control.id))
+        {
+            ESP_LOGW(TAG, "Ignoring control with invalid id '%s' (use letters, digits, '-' and '/')", control.id.c_str());
+            continue;
+        }
+        JsonObject object = controls[control.id].to<JsonObject>();
+        object["row"] = control.row;
+        object["column"] = control.column;
+        if (control.stylePreset.length() > 0)
+        {
+            object["stylePreset"] = control.stylePreset;
+        }
+    }
+
+    String json;
+    serializeJson(doc, json);
+    return json;
+}
+
+// ---------------------------------------------------------------------------
+// Receiving
+// ---------------------------------------------------------------------------
+
+void SatelliteSurface::handleMessage(const Message &message)
+{
+    const satellite_protocol::Params &params = message.params();
+    String command = toString(message.command());
+
+    if (message.isOk() || message.isError())
+    {
+        if (message.isOk())
+        {
+            if (message.is("ADD-DEVICE"))
+            {
+                ESP_LOGI(TAG, "Surface %s registered", _surfaceID.c_str());
+                if (onRegistered)
+                {
+                    onRegistered();
+                }
+            }
+        }
+        else if (onError)
+        {
+            onError(command, toString(params.get("MESSAGE").value_or("")));
+        }
+        return;
+    }
+
+    if (message.is("KEY-STATE"))
+    {
+        SatelliteControlState state;
+        if (std::optional<std::string_view> controlId = params.get("CONTROLID"))
+        {
+            state.controlId = toString(*controlId);
+            if (_config.layout)
+            {
+                const std::vector<SatelliteLayoutControl> &controls = _config.layout->controls;
+                for (size_t i = 0; i < controls.size(); i++)
+                {
+                    if (controls[i].id == state.controlId)
+                    {
+                        state.index = static_cast<uint16_t>(i);
+                        break;
+                    }
+                }
+            }
+        }
+        else if (std::optional<std::string_view> key = params.get("KEY"))
+        {
+            std::optional<double> index = satellite_protocol::parseNumber(*key);
+            if (!index || *index < 0)
+            {
+                ESP_LOGW(TAG, "KEY-STATE with invalid KEY");
+                return;
+            }
+            state.index = static_cast<uint16_t>(*index);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "KEY-STATE without KEY or CONTROLID");
+            return;
+        }
+
+        satelliteParseControlState(params, state);
+        if (onKeyStateChange)
+        {
+            onKeyStateChange(state);
+        }
+    }
+    else if (message.is("KEYS-CLEAR"))
+    {
         if (onKeysClear)
         {
             onKeysClear();
         }
     }
-    else if (command == "BRIGHTNESS")
+    else if (message.is("BRIGHTNESS"))
     {
-        // Handle brightness command
-        ESP_LOGI("SatelliteSurface", "BRIGHTNESS command received: %s", params.c_str());
-        // extract brightness value
-        std::vector<Satellite::ApiParam> tokens = _satellite->tokenizeApiParams(params);
-        Satellite::ApiParam brightnessParam = _satellite->findApiParam(tokens, "VALUE");
-        // call the onBrightnessSet callback if set
-        if (onBrightnessSet && brightnessParam.val.has_value())
+        std::optional<double> value = satellite_protocol::parseNumber(params.get("VALUE").value_or(""));
+        if (onBrightnessSet && value)
         {
-            long brightness = brightnessParam.val.value().toInt();
-            if (brightness < 0)
-            {
-                brightness = 0;
-            }
-            else if (brightness > 100)
-            {
-                brightness = 100;
-            }
-            onBrightnessSet(static_cast<uint8_t>(brightness));
+            onBrightnessSet(static_cast<uint8_t>(std::max(0.0, std::min(100.0, *value))));
         }
     }
-    else if (command == "VARIABLE-VALUE")
+    else if (message.is("VARIABLE-VALUE"))
     {
-        // Handle variable value update
-        ESP_LOGI("SatelliteSurface", "VARIABLE-VALUE command received: %s", params.c_str());
-        // extract variable ID and value
-        std::vector<Satellite::ApiParam> tokens = _satellite->tokenizeApiParams(params);
-        Satellite::ApiParam variableIDParam = _satellite->findApiParam(tokens, "VARIABLE");
-        Satellite::ApiParam variableValueParam = _satellite->findApiParam(tokens, "VALUE", true);
-        ESP_LOGI("SatelliteSurface", "Decoded variable %s value: %s", variableIDParam.val.value_or("<invalid>").c_str(), variableValueParam.val.value_or("<invalid>").c_str());
-        // call the onVariableSet callback if set
-        if (onVariableSet && variableIDParam.val.has_value() && variableValueParam.val.has_value())
+        std::optional<std::string_view> id = params.get("VARIABLE");
+        std::optional<std::string_view> encoded = params.get("VALUE");
+        std::optional<std::string> value = encoded ? satellite_protocol::base64Decode(*encoded) : std::nullopt;
+        if (onVariableSet && id && value)
         {
-            onVariableSet(variableIDParam.val.value(), variableValueParam.val.value());
+            onVariableSet(toString(*id), toString(*value));
         }
     }
-    else if (command == "LOCKED-STATE")
+    else if (message.is("LOCKED-STATE"))
     {
-        // Handle locked state update
-        ESP_LOGI("SatelliteSurface", "LOCKED-STATE command received: %s", params.c_str());
-        // extract locked state and characters entered
-        std::vector<Satellite::ApiParam> tokens = _satellite->tokenizeApiParams(params);
-        Satellite::ApiParam lockedParam = _satellite->findApiParam(tokens, "LOCKED");
-        Satellite::ApiParam charCountParam = _satellite->findApiParam(tokens, "CHARACTER_COUNT");
-        if (onLockedStateSet && lockedParam.val.has_value() && charCountParam.val.has_value())
+        SatelliteLockedState state;
+        state.locked = params.isTruthy("LOCKED");
+        state.characterCount = static_cast<uint8_t>(satellite_protocol::parseNumber(params.get("CHARACTER_COUNT").value_or("0")).value_or(0));
+        state.rotation = static_cast<int16_t>(satellite_protocol::parseNumber(params.get("ROTATION").value_or("0")).value_or(0));
+        if (onLockedStateSet)
         {
-            bool isLocked = parseApiBool(lockedParam.val.value());
-            uint8_t charactersEntered = static_cast<uint8_t>(charCountParam.val.value().toInt());
-            onLockedStateSet(isLocked, charactersEntered);
+            onLockedStateSet(state);
         }
     }
-    else if (command == "DEVICE-CONFIG")
+    else if (message.is("DEVICE-CONFIG"))
     {
-        // Handle runtime config values pushed by Companion.
-        ESP_LOGI("SatelliteSurface", "DEVICE-CONFIG command received: %s", params.c_str());
-        Satellite::ApiParam configParam = _satellite->findApiParam(_satellite->tokenizeApiParams(params), "CONFIG", true);
-        if (onDeviceConfig && configParam.val.has_value())
+        std::optional<std::string_view> encoded = params.get("CONFIG");
+        std::optional<std::string> config = encoded ? satellite_protocol::base64Decode(*encoded) : std::nullopt;
+        if (onDeviceConfig && config)
         {
-            onDeviceConfig(configParam.val.value());
+            onDeviceConfig(toString(*config));
         }
     }
     else
     {
-        ESP_LOGW("SatelliteSurface", "Unknown command received: %s", command.c_str());
+        ESP_LOGW(TAG, "Unhandled message %s", command.c_str());
     }
 }
 
-/**
- * @brief Send a button action to Companion
- *
- * Sends the appropriate command to Companion based on the action type:
- * - PRESSED/RELEASED: KEY-PRESS command
- * - RIGHT/LEFT: KEY-ROTATE command
- */
-void SatelliteSurface::buttonAction(uint8_t buttonIndex, SatelliteAction action)
+// ---------------------------------------------------------------------------
+// Sending
+// ---------------------------------------------------------------------------
+
+bool SatelliteSurface::resolveControl(uint16_t index, const String *&controlId) const
 {
-    if (buttonIndex >= _config.totalKeys)
+    if (_config.layout)
     {
-        ESP_LOGW("SatelliteSurface", "Ignoring button action for out-of-range key index %u (totalKeys=%u)", buttonIndex, _config.totalKeys);
-        return;
+        if (index >= _config.layout->controls.size())
+        {
+            ESP_LOGW(TAG, "Control index %u out of range (layout has %u controls)", index, static_cast<unsigned>(_config.layout->controls.size()));
+            return false;
+        }
+        controlId = &_config.layout->controls[index].id;
+        return true;
     }
 
-    ESP_LOGI("SatelliteSurface", "Button action %d on button %d", static_cast<int>(action), buttonIndex);
+    if (index >= _config.totalKeys)
+    {
+        ESP_LOGW(TAG, "Key index %u out of range (totalKeys=%u)", index, _config.totalKeys);
+        return false;
+    }
+    controlId = nullptr;
+    return true;
+}
+
+void SatelliteSurface::sendKeyAction(const String *controlId, uint16_t index, SatelliteAction action)
+{
     switch (action)
     {
-    case SatelliteAction::PRESSED:
-        _satellite->send("KEY-PRESS DEVICEID=" + _surfaceID + " KEY=" + String(buttonIndex) + " PRESSED=true\n");
-        break;
-    case SatelliteAction::RELEASED:
-        _satellite->send("KEY-PRESS DEVICEID=" + _surfaceID + " KEY=" + String(buttonIndex) + " PRESSED=false\n");
-        break;
     case SatelliteAction::RIGHT:
-        _satellite->send("KEY-ROTATE DEVICEID=" + _surfaceID + " KEY=" + String(buttonIndex) + " DIRECTION=1\n");
-        break;
-    case SatelliteAction::LEFT:
-        _satellite->send("KEY-ROTATE DEVICEID=" + _surfaceID + " KEY=" + String(buttonIndex) + " DIRECTION=-1\n");
-        break;
-    default:
-        ESP_LOGE("SatelliteSurface", "Invalid action for button: %d", static_cast<int>(action));
+        sendRotate(controlId, index, 1);
         return;
+    case SatelliteAction::LEFT:
+        sendRotate(controlId, index, -1);
+        return;
+    case SatelliteAction::PRESSED:
+    case SatelliteAction::RELEASED:
+        break;
+    }
+
+    if (!isRegistered())
+    {
+        ESP_LOGD(TAG, "Surface not registered, dropping key press");
+        return;
+    }
+
+    MessageBuilder command("KEY-PRESS");
+    command.deviceId(_surfaceID.c_str());
+    if (controlId)
+    {
+        command.str("CONTROLID", controlId->c_str());
+    }
+    else
+    {
+        command.num("KEY", index);
+    }
+    command.boolean("PRESSED", action == SatelliteAction::PRESSED);
+    _satellite->send(command.finish());
+}
+
+void SatelliteSurface::sendRotate(const String *controlId, uint16_t index, int steps)
+{
+    if (steps == 0)
+    {
+        return;
+    }
+    if (!isRegistered())
+    {
+        ESP_LOGD(TAG, "Surface not registered, dropping rotation");
+        return;
+    }
+
+    for (int direction : _satellite->rotationDirections(steps))
+    {
+        MessageBuilder command("KEY-ROTATE");
+        command.deviceId(_surfaceID.c_str());
+        if (controlId)
+        {
+            command.str("CONTROLID", controlId->c_str());
+        }
+        else
+        {
+            command.num("KEY", index);
+        }
+        command.num("DIRECTION", direction);
+        _satellite->send(command.finish());
     }
 }
 
-/**
- * @brief Set a variable value on this surface
- *
- * Sends a SET-VARIABLE-VALUE command to Companion with the base64-encoded value.
- */
+void SatelliteSurface::buttonAction(uint16_t buttonIndex, SatelliteAction action)
+{
+    const String *controlId = nullptr;
+    if (resolveControl(buttonIndex, controlId))
+    {
+        sendKeyAction(controlId, buttonIndex, action);
+    }
+}
+
+void SatelliteSurface::rotate(uint16_t buttonIndex, int steps)
+{
+    const String *controlId = nullptr;
+    if (resolveControl(buttonIndex, controlId))
+    {
+        sendRotate(controlId, buttonIndex, steps);
+    }
+}
+
+void SatelliteSurface::controlAction(const String &controlId, SatelliteAction action)
+{
+    if (!_config.layout)
+    {
+        ESP_LOGW(TAG, "controlAction() needs a layout surface, use buttonAction()");
+        return;
+    }
+    sendKeyAction(&controlId, 0, action);
+}
+
+void SatelliteSurface::rotateControl(const String &controlId, int steps)
+{
+    if (!_config.layout)
+    {
+        ESP_LOGW(TAG, "rotateControl() needs a layout surface, use rotate()");
+        return;
+    }
+    sendRotate(&controlId, 0, steps);
+}
+
 void SatelliteSurface::setVariable(const String &id, const String &value)
 {
-    if (!isSafeApiTokenValue(id))
+    if (!isRegistered())
     {
-        ESP_LOGW("SatelliteSurface", "Invalid VARIABLE id (must be non-empty and must not contain quotes/newlines)");
+        ESP_LOGD(TAG, "Surface not registered, dropping variable %s", id.c_str());
         return;
     }
 
-    ESP_LOGI("SatelliteSurface", "Setting variable %s to %s", id.c_str(), value.c_str());
-    // encode value as base64
-    String encodedValue = base64::encode(value);
-    String command;
-    command.reserve(64 + _surfaceID.length() + id.length() + encodedValue.length());
-    command = "SET-VARIABLE-VALUE DEVICEID=" + _surfaceID + " VARIABLE=\"" + id + "\" VALUE=\"" + encodedValue + "\"\n";
-    _satellite->send(command);
+    MessageBuilder command("SET-VARIABLE-VALUE");
+    command.deviceId(_surfaceID.c_str())
+        .str("VARIABLE", id.c_str())
+        .str("VALUE", satellite_protocol::base64Encode(std::string_view(value.c_str(), value.length())));
+    if (!command.ok())
+    {
+        ESP_LOGW(TAG, "Invalid variable id '%s'", id.c_str());
+        return;
+    }
+    _satellite->send(command.finish());
 }
 
-/**
- * @brief Press a pincode key on this surface
- *
- * Sends a PINCODE-KEY command to Companion for the specified key index.
- * Used for surfaces that support pincode input functionality.
- */
 void SatelliteSurface::pressPincodeKey(uint8_t keyIndex)
 {
     if (keyIndex > 9)
     {
-        ESP_LOGW("SatelliteSurface", "Invalid pincode key index %u, expected 0-9", keyIndex);
+        ESP_LOGW(TAG, "Invalid pincode key %u, expected 0-9", keyIndex);
         return;
     }
-
-    ESP_LOGI("SatelliteSurface", "Pressing pincode key: %d", keyIndex);
-    _satellite->send("PINCODE-KEY DEVICEID=" + _surfaceID + " KEY=" + String(keyIndex) + "\n");
+    if (!isRegistered())
+    {
+        ESP_LOGD(TAG, "Surface not registered, dropping pincode key");
+        return;
+    }
+    _satellite->send(MessageBuilder("PINCODE-KEY").deviceId(_surfaceID.c_str()).num("KEY", keyIndex).finish());
 }
 
-/**
- * @brief Report firmware update availability for this surface (API >= 1.10.0)
- *
- * The update URL may be empty to clear availability. Non-empty values must be
- * protocol-safe (no quotes or newlines).
- */
 void SatelliteSurface::reportFirmwareUpdateInfo(const String &updateUrl)
 {
-    if (updateUrl.length() > 0 && !isSafeApiTokenValue(updateUrl))
+    if (!isRegistered())
     {
-        ESP_LOGW("SatelliteSurface", "Invalid UPDATE_URL value (must not contain quotes/newlines)");
+        ESP_LOGD(TAG, "Surface not registered, dropping firmware update info");
         return;
     }
 
-    ESP_LOGI("SatelliteSurface", "Reporting firmware update URL for %s", _surfaceID.c_str());
-    _satellite->send("FIRMWARE-UPDATE-INFO DEVICEID=\"" + _surfaceID + "\" UPDATE_URL=\"" + updateUrl + "\"\n");
+    MessageBuilder command("FIRMWARE-UPDATE-INFO");
+    command.deviceId(_surfaceID.c_str()).str("UPDATE_URL", updateUrl.c_str());
+    if (!command.ok())
+    {
+        ESP_LOGW(TAG, "Invalid update URL");
+        return;
+    }
+    _satellite->send(command.finish());
 }
 
-/**
- * @brief Request a page change for this surface (API >= 1.10.0)
- */
 void SatelliteSurface::changePage(SatellitePageDirection direction)
 {
-    int directionValue;
-    switch (direction)
+    if (!isRegistered())
     {
-    case SatellitePageDirection::NEXT:
-        directionValue = 1;
-        break;
-    case SatellitePageDirection::PREVIOUS:
-        // CHANGE-PAGE uses 0 for previous, unlike KEY-ROTATE/SUB-ROTATE which use -1.
-        directionValue = 0;
-        break;
-    default:
-        ESP_LOGE("SatelliteSurface", "Invalid direction for page change: %d", static_cast<int>(direction));
+        ESP_LOGD(TAG, "Surface not registered, dropping page change");
         return;
     }
-
-    ESP_LOGI("SatelliteSurface", "Requesting page change for %s direction=%d", _surfaceID.c_str(), directionValue);
-    _satellite->send("CHANGE-PAGE DEVICEID=\"" + _surfaceID + "\" DIRECTION=" + String(directionValue) + "\n");
+    // CHANGE-PAGE uses 1 for next and 0 for previous
+    _satellite->send(MessageBuilder("CHANGE-PAGE").deviceId(_surfaceID.c_str()).num("DIRECTION", direction == SatellitePageDirection::NEXT ? 1 : 0).finish());
 }

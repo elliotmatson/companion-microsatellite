@@ -10,14 +10,28 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
+  # Host-side tests (test/host): the protocol codec against Companion's conformance
+  # corpus, and the Satellite classes against mocked Arduino/AsyncTCP, under ASan/UBSan.
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Build and run host tests
+        run: make -C test/host
+
   # examples/pio-exhaustive is a PlatformIO project (its own platformio.ini).
   build-platformio:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        chip: [esp32, esp32s2, esp32s3, esp32c3, esp32c6]
+        # esp32-minimal: esp32 without the REST config API and mDNS (build flags)
+        chip: [esp32, esp32-minimal, esp32s2, esp32s3, esp32c3, esp32c6]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,8 +50,13 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install PlatformIO
-        run: pip install --upgrade platformio
+        # 6.2.0 bundles SCons 4.11, which dropped SCons.Tool.FortranCommon that the
+        # pinned pioarduino platform still imports - stay on 6.1.x (SCons 4.8)
+        run: pip install "platformio==6.1.19"
       - name: Setup git for private libraries
+        # Only needed when GH_PAT is configured for private dependencies; without
+        # it, gh fails with "not logged in" and every dependency here is public.
+        if: env.GH_TOKEN != ''
         run: gh auth setup-git
       - name: Build pio-exhaustive for ${{ matrix.chip }}
         run: pio run -e ${{ matrix.chip }} -d examples/pio-exhaustive
@@ -50,7 +69,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [basic, subscriptions, configuration-and-variables, pincode]
+        example:
+          [
+            basic,
+            subscriptions,
+            configuration-and-variables,
+            pincode,
+            encoder-led-ring,
+          ]
         fqbn: [esp32, esp32s2, esp32s3, esp32c3, esp32c6]
     steps:
       - name: Checkout
@@ -104,9 +130,12 @@ jobs:
           arduino-cli core install esp32:esp32
       - name: Install library dependencies
         run: |
-          arduino-cli lib install ArduinoJson TFT_eSPI XPT2046_Touchscreen
+          arduino-cli lib install ArduinoJson TFT_eSPI XPT2046_Touchscreen PNGdec
           arduino-cli config set library.enable_unsafe_install true
           arduino-cli lib install --git-url https://github.com/ESP32Async/AsyncTCP.git
           arduino-cli lib install --git-url https://github.com/ESP32Async/ESPAsyncWebServer.git
+      - name: Install the CYD's TFT_eSPI setup
+        # TFT_eSPI only reads its settings from its own User_Setup.h (see the top of cyd.ino)
+        run: cp examples/cyd/User_Setup_CYD.h ~/Arduino/libraries/TFT_eSPI/User_Setup.h
       - name: Compile cyd for esp32:esp32:esp32
         run: arduino-cli compile --fqbn esp32:esp32:esp32 --library . examples/cyd
