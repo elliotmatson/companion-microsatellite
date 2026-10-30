@@ -203,7 +203,8 @@ Arduino IDE sketches (`.ino`, no `platformio.ini`) - open directly in the Arduin
 - [`examples/configuration-and-variables`](examples/configuration-and-variables) - a custom settings form (`CONFIG_FIELDS`/`DEVICE-CONFIG`, Companion -> device) alongside an input variable and an output variable (`setVariable()`/`setOnVariableSet()`, both directions).
 - [`examples/pincode`](examples/pincode) - a surface that handles Companion's pincode-lock feature itself: shows the locked state and forwards digit presses with `pressPincodeKey()`.
 - [`examples/cyd`](examples/cyd) - renders a 4x3 button surface directly on a "Cheap Yellow Display" (ESP32-2432S028R) touchscreen, decoding and drawing the actual bitmap Companion sends for each key, and reporting touches as button presses.
-  Needs the extra `TFT_eSPI`, `XPT2046_Touchscreen` and `PNGdec` libraries (it asks Companion for PNG bitmaps, 17x less data than raw rgb), with TFT_eSPI set up from [`User_Setup_CYD.h`](examples/cyd/User_Setup_CYD.h) (see the top of `cyd.ino`); targets that one board rather than building across variants.
+  WiFi is set up from a phone, and each release has it built as ready-to-flash firmware.
+  Needs the extra `TFT_eSPI`, `XPT2046_Touchscreen`, `PNGdec` and `WiFiManager` libraries (it asks Companion for PNG bitmaps, 17x less data than raw rgb), with TFT_eSPI set up from [`User_Setup_CYD.h`](examples/cyd/User_Setup_CYD.h) (see the top of `cyd.ino`); targets that one board rather than building across variants.
 
 PlatformIO projects are prefixed `pio-` and have their own `platformio.ini`:
 
