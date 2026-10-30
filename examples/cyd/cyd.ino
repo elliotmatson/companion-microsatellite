@@ -129,6 +129,26 @@ SatelliteSurface surface(satellite, "CYD Surface", surfaceConfig);
 // Index of the key currently held down by touch, or -1 if none.
 int8_t activeKeyIndex = -1;
 
+// Decoded PNG rows are collected into bands, and each band goes to the
+// display by DMA while PNGdec decompresses the next into the other buffer -
+// the display transfer then mostly hides behind the decompression, instead of
+// the CPU waiting on 80 separate row writes.
+constexpr int kPngBandRows = 16;
+uint16_t pngBands[2][kPngBandRows * kBitmapSize];
+bool dmaReady = false; // tft.initDMA() worked (otherwise bands are pushed the ordinary way)
+
+// The PNG being drawn, for pngDrawRow(). (Up here with the other globals, ahead of
+// every function, so the prototypes the Arduino IDE generates for them can use it.)
+struct PngTarget
+{
+  int16_t x;
+  int16_t y;
+  int width;
+  int band;        // which of pngBands is being filled
+  int bandRows;    // rows in it so far
+  int bandStartY;  // image row its first row came from
+};
+
 // Compute the on-screen rectangle for a key index (0 = top-left, increasing left-to-right then top-to-bottom).
 void cellRect(uint8_t index, int16_t &x, int16_t &y, int16_t &w, int16_t &h)
 {
@@ -160,21 +180,45 @@ uint16_t bitmapBuffer[(kRawBitmapLength + 1) / 2];
 // the one, kept for good rather than allocated per image.
 PNG png;
 
-// Where the PNG being decoded goes on screen, for pngDrawRow().
-struct PngTarget
+// Send the band being filled to the display, and switch to the other one.
+void flushPngBand(PngTarget *target)
 {
-  int16_t x;
-  int16_t y;
-};
+  if (target->bandRows == 0)
+  {
+    return;
+  }
+  uint16_t *band = pngBands[target->band];
+  int16_t y = target->y + target->bandStartY;
+  if (dmaReady)
+  {
+    // Waits for the previous band's transfer (from the other buffer) to finish, then
+    // starts this one and returns, so the next band can be decoded meanwhile
+    tft.pushImageDMA(target->x, y, target->width, target->bandRows, band);
+  }
+  else
+  {
+    tft.pushImage(target->x, y, target->width, target->bandRows, band);
+  }
+  target->band ^= 1;
+  target->bandRows = 0;
+}
 
-// PNGdec hands over the image a row at a time: convert it and push it out.
+// PNGdec hands over the image a row at a time: convert it into the current band.
 int pngDrawRow(PNGDRAW *draw)
 {
-  const PngTarget *target = static_cast<const PngTarget *>(draw->pUser);
-  uint16_t row[kBitmapSize];
-  // Little-endian, like drawRawBitmap()'s pixels: setSwapBytes(true) fixes up the order
-  png.getLineAsRGB565(draw, row, PNG_RGB565_LITTLE_ENDIAN, 0xffffffff);
-  tft.pushImage(target->x, target->y + draw->y, draw->iWidth, 1, row);
+  PngTarget *target = static_cast<PngTarget *>(draw->pUser);
+  if (target->bandRows == 0)
+  {
+    target->bandStartY = draw->y;
+  }
+  target->width = draw->iWidth;
+  uint16_t *row = pngBands[target->band] + target->bandRows * draw->iWidth;
+  // Big-endian is the display's own byte order, so the band can go out as it is
+  png.getLineAsRGB565(draw, row, PNG_RGB565_BIG_ENDIAN, 0xffffffff);
+  if (++target->bandRows == kPngBandRows)
+  {
+    flushPngBand(target);
+  }
   return 1;
 }
 
@@ -194,10 +238,17 @@ bool drawPngBitmap(int16_t x, int16_t y, const SatelliteEncodedData &bitmap)
   bool fits = png.getWidth() <= kBitmapSize && png.getHeight() <= kBitmapSize;
   if (fits)
   {
-    PngTarget target{x, y};
-    tft.startWrite(); // one SPI transaction for all the rows
+    PngTarget target{x, y, 0, 0, 0, 0};
+    // The bands are already in the display's byte order, and pushImageDMA() would
+    // otherwise swap them in place
+    bool swapBytes = tft.getSwapBytes();
+    tft.setSwapBytes(false);
+    tft.startWrite(); // one SPI transaction for the whole image
     png.decode(&target, 0);
+    flushPngBand(&target); // the last, partial band
+    tft.dmaWait();
     tft.endWrite();
+    tft.setSwapBytes(swapBytes);
   }
   png.close();
   return fits;
@@ -379,6 +430,7 @@ void setup()
   // Bitmaps are drawn from native (little-endian) RGB565 uint16_t values;
   // pushImage() sends them high byte first unless told to swap.
   tft.setSwapBytes(true);
+  dmaReady = tft.initDMA();
   tft.fillScreen(TFT_BLACK);
 
   touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
