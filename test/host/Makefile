@@ -13,7 +13,11 @@
 #   make update-corpus
 
 CXX ?= g++
-CXXFLAGS ?= -std=c++20 -O1 -g -Wall -Wextra -Werror -Wno-maybe-uninitialized -Wno-missing-field-initializers -fsanitize=address,undefined -fno-sanitize-recover=all
+CXXFLAGS ?= -std=c++20 -O1 -g -Wall -Wextra -Werror -Wno-missing-field-initializers -fsanitize=address,undefined -fno-sanitize-recover=all
+# -Wmaybe-uninitialized is GCC-only; clang (the default g++ on macOS) rejects it under -Werror
+ifeq ($(findstring clang,$(shell $(CXX) --version 2>/dev/null)),)
+CXXFLAGS += -Wno-maybe-uninitialized
+endif
 ARDUINOJSON ?= build/ArduinoJson/src
 CORPUS_URL = https://raw.githubusercontent.com/bitfocus/companion/main/satellite-protocol/assets/satellite-protocol-corpus.json
 
