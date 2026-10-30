@@ -5,6 +5,12 @@
 // sends for each key, and reports touches back as button presses - no
 // external buttons or NeoPixels needed.
 //
+// WiFi is set up from a phone: with no saved network (or if it can't be
+// reached) the board starts its own access point with a setup page, where
+// you pick the network and can enter Companion's address. The board's RGB
+// LED shows where it's got to, and the BOOT button calibrates the touch
+// screen (short press) or forgets the WiFi network (hold for 3 seconds).
+//
 // Targets the classic ESP32-WROOM-32 "Cheap Yellow Display" board sold as
 // ESP32-2432S028R: a 320x240 ILI9341 SPI TFT with a resistive XPT2046
 // touch controller. There are several CYD hardware revisions (capacitive
@@ -21,6 +27,7 @@
 // - TFT_eSPI (Bodmer)
 // - XPT2046_Touchscreen (Paul Stoffregen), 1.4 or later
 // - PNGdec (Larry Bank), 1.1 or later
+// - WiFiManager (tzapu), 2.0 or later
 //
 // TFT_eSPI setup: TFT_eSPI takes its display settings from the User_Setup.h
 // in its own library folder, and those settings have to be the same for the
@@ -47,12 +54,13 @@
 #include <Preferences.h>
 #include <XPT2046_Touchscreen.h>
 #include <WiFi.h>
+#include <WiFiManager.h>
 #include "companion-satellite.hpp"
 
-// WiFi configuration - replace with your own network before flashing, and
-// avoid committing real credentials to a tracked file.
-#define WIFI_SSID "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+// How long the WiFi setup page waits for someone before the board restarts
+// and tries the saved network again (eg. after a power cut, when the board
+// came up before the router).
+constexpr uint32_t kWifiSetupTimeoutSeconds = 300;
 
 // Resistive touch controller pins (separate SPI bus from the display).
 #define XPT2046_IRQ 36
@@ -62,15 +70,23 @@
 #define XPT2046_CS 33
 
 // The BOOT button, read once the sketch is running (holding it during reset
-// puts the ESP32 into download mode instead).
+// puts the ESP32 into download mode instead). A short press runs the touch
+// calibration; holding it forgets the WiFi network and restarts into setup.
 #define BOOT_BUTTON 0
+constexpr uint32_t kBootShortPressMs = 1000;
+constexpr uint32_t kBootWifiResetMs = 3000;
+
+// The RGB status LED. Its pins are pulled low to light it.
+#define LED_RED 4
+#define LED_GREEN 16
+#define LED_BLUE 17
+constexpr uint8_t kLedBrightness = 24; // out of 255 - full brightness is glaring
 
 // Raw touch calibration: the raw readings at the screen's left/right and
 // top/bottom edges. These defaults suit most of these boards, but resistive
-// touch panels vary unit to unit - if touches feel offset, hold a finger on
-// the screen while the board starts up, or press the BOOT button once it's
-// running, to run the on-screen calibration. It saves its result in flash
-// and is used from then on.
+// touch panels vary unit to unit - if touches feel offset, press the BOOT
+// button to run the on-screen calibration. It saves its result in flash and
+// is used from then on.
 #define TOUCH_RAW_X_MIN 200
 #define TOUCH_RAW_X_MAX 3700
 #define TOUCH_RAW_Y_MIN 240
@@ -128,6 +144,32 @@ SatelliteSurface surface(satellite, "CYD Surface", surfaceConfig);
 
 // Index of the key currently held down by touch, or -1 if none.
 int8_t activeKeyIndex = -1;
+
+// Set while something else is on the screen (the BOOT countdown), so key
+// updates from Companion don't draw over it. They're all sent again after.
+bool keysHidden = false;
+
+// WiFi setup: a captive portal on the board's own access point. Besides the
+// network, it asks (optionally) for Companion's address, as "host" or
+// "host:port" - leave it empty to keep the current one, or to let Companion
+// find this device itself (Surfaces > Discover).
+WiFiManager wifiManager;
+WiFiManagerParameter companionParam("companion", "Companion IP or hostname (optional)", "", 64);
+String companionFromSetup; // what was entered, applied once the satellite starts
+
+// What the status LED shows. Each state can be told apart with just green
+// and blue, as on some boards the red part of the LED isn't connected. (Up
+// here, ahead of every function, so the prototypes the Arduino IDE
+// generates for them can use it.)
+enum class LedStatus
+{
+  WIFI_SETUP,           // blue, blinking: setup access point is up
+  WIFI_CONNECTING,      // blue: joining the WiFi network
+  COMPANION_CONNECTING, // cyan, blinking: on WiFi, looking for Companion
+  READY,                // green: connected, and Companion has the surface
+  REJECTED,             // red and white, alternating: Companion is too old for this library
+  WIFI_RESET_HOLD,      // white, blinking fast: BOOT held, about to forget WiFi
+};
 
 // Decoded PNG rows are collected into bands, and each band goes to the
 // display by DMA while PNGdec decompresses the next into the other buffer -
@@ -420,6 +462,225 @@ int8_t touchToKeyIndex(uint16_t rawX, uint16_t rawY)
   return (index < kKeyCount) ? static_cast<int8_t>(index) : -1;
 }
 
+// Light the RGB LED, each channel 0 (off) to 1 (kLedBrightness).
+void setLed(bool red, bool green, bool blue)
+{
+  // The LED is lit by pulling its pins low, so full duty cycle is off
+  analogWrite(LED_RED, red ? 255 - kLedBrightness : 255);
+  analogWrite(LED_GREEN, green ? 255 - kLedBrightness : 255);
+  analogWrite(LED_BLUE, blue ? 255 - kLedBrightness : 255);
+}
+
+void showLedStatus(LedStatus status)
+{
+  bool blinkSlow = (millis() / 500) % 2;
+  bool blinkFast = (millis() / 100) % 2;
+  switch (status)
+  {
+  case LedStatus::WIFI_SETUP:
+    setLed(false, false, blinkSlow);
+    break;
+  case LedStatus::WIFI_CONNECTING:
+    setLed(false, false, true);
+    break;
+  case LedStatus::COMPANION_CONNECTING:
+    setLed(false, blinkSlow, blinkSlow);
+    break;
+  case LedStatus::READY:
+    setLed(false, true, false);
+    break;
+  case LedStatus::REJECTED:
+    setLed(true, blinkSlow, blinkSlow);
+    break;
+  case LedStatus::WIFI_RESET_HOLD:
+    setLed(blinkFast, blinkFast, blinkFast);
+    break;
+  }
+}
+
+// Where things stand, for the LED: WiFi first, then the connection to Companion.
+LedStatus connectionLedStatus()
+{
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    return LedStatus::WIFI_CONNECTING;
+  }
+  switch (satellite.getConnectionState())
+  {
+  case SatelliteConnectionState::READY:
+    return surface.isRegistered() ? LedStatus::READY : LedStatus::COMPANION_CONNECTING;
+  case SatelliteConnectionState::REJECTED:
+    return LedStatus::REJECTED;
+  default:
+    return LedStatus::COMPANION_CONNECTING;
+  }
+}
+
+// A message in the middle of the screen, for while there are no keys to show.
+void drawStatusScreen(const String &title, const String &line1 = "", const String &line2 = "", const String &line3 = "")
+{
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(2);
+  tft.drawString(title, kScreenWidth / 2, kScreenHeight / 2 - 40);
+  tft.setTextSize(1);
+  tft.drawString(line1, kScreenWidth / 2, kScreenHeight / 2);
+  tft.drawString(line2, kScreenWidth / 2, kScreenHeight / 2 + 16);
+  tft.drawString(line3, kScreenWidth / 2, kScreenHeight / 2 + 40);
+}
+
+// Until Companion has the surface, show what the board is waiting for instead of empty keys.
+void drawCompanionStatus(SatelliteConnectionState state)
+{
+  String self = "This device: " + WiFi.localIP().toString();
+  if (state == SatelliteConnectionState::REJECTED)
+  {
+    drawStatusScreen("Companion too old", "This needs Companion 4.3 or later", self);
+  }
+  else if (satellite.getTargetHostname().length() == 0)
+  {
+    drawStatusScreen("Companion not set", "Add this device in Companion (Surfaces > Discover),",
+                     "or hold BOOT for 3s to set it in WiFi setup", self);
+  }
+  else
+  {
+    drawStatusScreen("Looking for Companion",
+                     satellite.getTargetHostname() + ":" + String(satellite.getTargetPort()), self);
+  }
+}
+
+void drawEmptyGrid()
+{
+  tft.fillScreen(TFT_BLACK);
+  for (uint8_t i = 0; i < kKeyCount; i++)
+  {
+    drawCellColor(i, TFT_BLACK);
+  }
+}
+
+// Join the saved WiFi network, or run the setup portal until someone sets one up.
+void setupWiFi()
+{
+  // A name per board, from the end of its MAC address
+  char apNameBuffer[24];
+  snprintf(apNameBuffer, sizeof(apNameBuffer), "CYD-Companion-%04X", static_cast<unsigned>((ESP.getEfuseMac() >> 32) & 0xffff));
+  String apName = apNameBuffer;
+
+  drawStatusScreen("Connecting to WiFi", "Hold BOOT for 3s to set up another network");
+  showLedStatus(LedStatus::WIFI_CONNECTING);
+
+  wifiManager.addParameter(&companionParam);
+  std::vector<const char *> menu = {"wifi", "exit"};
+  wifiManager.setMenu(menu);
+  wifiManager.setTitle("Companion CYD");
+  wifiManager.setConnectTimeout(20);
+  wifiManager.setConfigPortalTimeout(kWifiSetupTimeoutSeconds);
+  wifiManager.setAPCallback([apName](WiFiManager *)
+                            {
+                              drawStatusScreen("WiFi setup", "On your phone, join the WiFi network",
+                                               apName, "then open http://192.168.4.1 if it doesn't open itself");
+                              showLedStatus(LedStatus::WIFI_SETUP); });
+  wifiManager.setSaveParamsCallback([]()
+                                    { companionFromSetup = companionParam.getValue(); });
+
+  if (!wifiManager.autoConnect(apName.c_str()))
+  {
+    // Nobody set it up in time: start again, which tries the saved network first
+    Serial.println("WiFi setup timed out, restarting");
+    ESP.restart();
+  }
+  Serial.printf("Connected to WiFi, IP %s\n", WiFi.localIP().toString().c_str());
+}
+
+// Point the satellite at what was entered on the setup page, if anything ("host" or "host:port").
+void applyCompanionFromSetup()
+{
+  companionFromSetup.trim();
+  if (companionFromSetup.length() == 0)
+  {
+    return;
+  }
+  String host = companionFromSetup;
+  uint16_t port = 16622;
+  int colon = host.lastIndexOf(':');
+  if (colon > 0)
+  {
+    long parsed = host.substring(colon + 1).toInt();
+    if (parsed > 0 && parsed <= 65535)
+    {
+      port = static_cast<uint16_t>(parsed);
+      host = host.substring(0, colon);
+    }
+  }
+  satellite.setTarget(host, port);
+}
+
+// BOOT: a short press runs the touch calibration; holding it forgets the WiFi
+// network and restarts into setup. Returns true while it's being held, so the
+// LED can show the countdown.
+bool handleBootButton()
+{
+  static uint32_t pressedAtMs = 0;
+  static int lastSecondsLeft = -1;
+  bool down = digitalRead(BOOT_BUTTON) == LOW;
+  uint32_t now = millis();
+
+  if (down)
+  {
+    if (pressedAtMs == 0)
+    {
+      pressedAtMs = now;
+    }
+    uint32_t heldMs = now - pressedAtMs;
+    if (heldMs >= kBootWifiResetMs)
+    {
+      Serial.println("Forgetting the WiFi network and restarting into setup");
+      drawStatusScreen("Forgetting WiFi", "Restarting into WiFi setup...");
+      wifiManager.resetSettings();
+      delay(500);
+      ESP.restart();
+    }
+    if (heldMs >= kBootShortPressMs)
+    {
+      int secondsLeft = (kBootWifiResetMs - heldMs + 999) / 1000;
+      if (secondsLeft != lastSecondsLeft)
+      {
+        keysHidden = true;
+        drawStatusScreen("Keep holding to forget WiFi", String(secondsLeft) + "...", "Let go to cancel");
+        lastSecondsLeft = secondsLeft;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  if (pressedAtMs != 0)
+  {
+    bool shortPress = now - pressedAtMs < kBootShortPressMs;
+    pressedAtMs = 0;
+    lastSecondsLeft = -1;
+    keysHidden = false;
+    if (shortPress)
+    {
+      runTouchCalibration();
+    }
+    // The calibration or the countdown replaced the keys: start the screen again, and
+    // reconnect so Companion sends every key again
+    if (satellite.getConnectionState() == SatelliteConnectionState::READY)
+    {
+      drawEmptyGrid();
+      satellite.setTarget(satellite.getTargetHostname(), satellite.getTargetPort());
+    }
+    else
+    {
+      drawCompanionStatus(satellite.getConnectionState());
+    }
+    activeKeyIndex = -1;
+  }
+  return false;
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -436,27 +697,22 @@ void setup()
   touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
   touchscreen.begin(touchscreenSPI);
   touchscreen.setRotation(1);
-
-  // Holding a finger on the screen during startup runs the touch calibration.
   loadTouchCalibration();
-  if (touchscreen.touched())
-  {
-    runTouchCalibration();
-  }
   pinMode(BOOT_BUTTON, INPUT_PULLUP);
 
-  for (uint8_t i = 0; i < kKeyCount; i++)
-  {
-    drawCellColor(i, TFT_BLACK);
-  }
+  setupWiFi();
+  // Set before begin(), so it replaces whatever target was saved
+  applyCompanionFromSetup();
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    delay(1000);
-    Serial.println("Connecting to WiFi...");
-  }
-  Serial.println("Connected to WiFi");
+  // Until Companion has the surface, the screen says what the board is waiting for
+  satellite.setOnConnectionStateChange([](SatelliteConnectionState state)
+                                       {
+                                         if (state != SatelliteConnectionState::READY)
+                                         {
+                                           drawCompanionStatus(state);
+                                         } });
+  surface.setOnRegistered([]()
+                          { drawEmptyGrid(); });
 
   // Size the receive buffers for this sketch's bitmaps: a line just long enough for one
   // key, and room to queue a couple while the next arrives, so receiving and drawing
@@ -470,7 +726,7 @@ void setup()
   // to a flat color fill if no bitmap is available yet.
   surface.setOnKeyStateChange([](const SatelliteSurfaceKeyState &state)
                               {
-                                if (state.index >= kKeyCount)
+                                if (state.index >= kKeyCount || keysHidden)
                                 {
                                   return;
                                 }
@@ -489,10 +745,12 @@ void setup()
 
   surface.setOnKeysClear([]()
                          {
-                           for (uint8_t i = 0; i < kKeyCount; i++)
+                           if (!keysHidden)
                            {
-                             drawCellColor(i, TFT_BLACK);
+                             drawEmptyGrid();
                            } });
+
+  drawCompanionStatus(satellite.getConnectionState());
 }
 
 void loop()
@@ -500,20 +758,10 @@ void loop()
   // Draws any key updates received since last time (see drawCellBitmap).
   satellite.loop();
 
-  // The BOOT button runs the touch calibration too.
-  if (digitalRead(BOOT_BUTTON) == LOW)
-  {
-    runTouchCalibration();
-    for (uint8_t i = 0; i < kKeyCount; i++)
-    {
-      drawCellColor(i, TFT_BLACK);
-    }
-    // The calibration screen wiped the keys: reconnecting makes Companion send them all again.
-    satellite.setTarget(satellite.getTargetHostname(), satellite.getTargetPort());
-    activeKeyIndex = -1;
-  }
+  bool bootHeld = handleBootButton();
+  showLedStatus(bootHeld ? LedStatus::WIFI_RESET_HOLD : connectionLedStatus());
 
-  if (touchscreen.touched())
+  if (touchscreen.touched() && surface.isRegistered())
   {
     TS_Point point = touchscreen.getPoint();
     int8_t index = touchToKeyIndex(point.x, point.y);
