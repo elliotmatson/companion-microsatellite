@@ -126,7 +126,7 @@ They only remove code from the library's `.cpp` files - no header changes with t
 
 ## Migrating from 0.0.1
 
-0.1.0 changes some of the API. Most sketches only need the first two changes.
+1.0.0 changes some of the API. Most sketches only need the first two changes.
 
 **Call `satellite.loop()`.** Callbacks used to run on the AsyncTCP network task as messages arrived. They now run inside `satellite.loop()`, so call it from your `loop()`. A sketch that never calls it still connects and registers, but its callbacks never run (a warning is logged once updates have waited 5 seconds). To keep the old behaviour, pass `SatelliteDispatchMode::IMMEDIATE`:
 
@@ -136,7 +136,7 @@ void loop() {
     // ...
 }
 
-// 0.1.0
+// 1.0.0
 void loop() {
     satellite.loop();
     // ...
@@ -156,7 +156,7 @@ if (state.bitmap) {
     decodeAndDraw(state.bitmap.value()); // a base64 String
 }
 
-// 0.1.0
+// 1.0.0
 if (state.bitmap && !state.bitmap->isDataUrl()) {
     size_t length = state.bitmap->decode(buffer, sizeof(buffer)); // raw rgb bytes
 }
@@ -170,7 +170,7 @@ satellite.addSubscription("sub-1", "1/0/0", 72, String("rgb"), true, true, false
 satellite.setOnSubscriptionState([](const Satellite::SubscriptionState &state) { /* ... */ });
 satellite.subscriptionAction("sub-1", SatelliteAction::PRESSED);
 
-// 0.1.0
+// 1.0.0
 SatelliteSubscriptionConfig config = {.bitmapSize = 72, .bitmapFormat = "rgb"};
 SatelliteSubscription subscription(satellite, "1/0/0", config);
 subscription.setOnStateChange([](const SatelliteControlState &state) { /* ... */ });
@@ -179,7 +179,7 @@ subscription.action(SatelliteAction::PRESSED);
 
 Everything else, in order of how likely it is to affect you:
 
-| 0.0.1                                                                                   | 0.1.0                                                                                                                                          |
+| 0.0.1                                                                                   | 1.0.0                                                                                                                                          |
 | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `setOnLockedStateSet([](bool locked, uint8_t characters) {...})`                        | `setOnLockedStateSet([](const SatelliteLockedState &state) {...})`, with `locked`, `characterCount` and the new `rotation`                     |
 | `esp_event` events on `SATELLITE_EVENTS` (`SATELLITE_EVENT_*`)                          | `satellite.setOnConnectionStateChange(...)` with a `SatelliteConnectionState`                                                                  |
