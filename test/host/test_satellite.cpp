@@ -850,6 +850,72 @@ static void testReceiveOutOfMemory()
     CHECK(seen.size() == 1 && seen[0] == 1, "big updates get through once memory is back");
 }
 
+// Receive flow control: when loop() falls behind, acks are held back so Companion's TCP window
+// closes, instead of the queue overflowing and dropping updates. Companion is modelled as a
+// sender that stops once a window's worth of data is unacked, as TCP makes it.
+static void testReceiveFlowControl()
+{
+    currentTest = "receive-flow-control";
+    constexpr size_t kWindow = 5760;
+    Satellite satellite("test-flow");
+    SatelliteSurfaceConfig config;
+    config.totalKeys = 8;
+    SatelliteSurface surface(satellite, "Keys", config);
+    satellite.setTarget("c", 16622);
+    SatelliteOptions options = testOptions();
+    options.maxQueuedBytes = 16384; // pauses above 16384 - 4096 (line) - 5760 (window) - 2048 = 4480 bytes
+    satellite.begin(options);
+    AsyncClient *client = connectReady(satellite);
+    ackDeviceAdds(client, takeLines(client));
+    satellite.loop();
+    std::string id = surface.getID().c_str();
+
+    std::vector<uint16_t> seen;
+    surface.setOnKeyStateChange([&](const SatelliteControlState &state)
+                                { seen.push_back(state.index); });
+
+    // A page of 8 ~3KB key updates, sent while the window allows
+    std::vector<std::string> page;
+    for (int key = 0; key < 8; key++)
+    {
+        page.push_back("KEY-STATE DEVICEID=\"" + id + "\" KEY=" + std::to_string(key) + " BITMAP=\"" + std::string(3000, 'A') + "\"\n");
+    }
+    size_t sent = 0;
+    auto sendWhileWindowOpen = [&]()
+    {
+        while (sent < page.size() && client->unackedBytes() + page[sent].size() <= kWindow)
+        {
+            client->simulateData(page[sent++]);
+        }
+    };
+
+    sendWhileWindowOpen();
+    CHECK(satellite._rxPaused && client->unackedBytes() > 0, "paused with acks held (%zu unacked)", client->unackedBytes());
+    CHECK(sent < page.size(), "Companion had to wait (%zu of %zu sent)", sent, page.size());
+    CHECK(satellite._droppedUpdates == 0 && satellite._queuedBytes <= options.maxQueuedBytes, "nothing dropped, queue within bounds (%zu)", satellite._queuedBytes);
+
+    // A long pause is our own doing, not a dead connection
+    advance(satellite, 10000);
+    CHECK(satellite.getConnectionState() == SatelliteConnectionState::READY && currentClient(satellite) == client, "keepalive doesn't fire while paused");
+
+    // loop() catches up, the held segments are acked, and the rest of the page arrives
+    for (int round = 0; round < 10 && sent < page.size(); round++)
+    {
+        satellite.loop();
+        sendWhileWindowOpen();
+    }
+    satellite.loop();
+    CHECK(sent == page.size() && client->unackedBytes() == 0 && !satellite._rxPaused, "resumed and fully acked (%zu sent, %zu unacked)", sent, client->unackedBytes());
+    CHECK(seen.size() == 8 && satellite._droppedUpdates == 0, "every update delivered (%zu)", seen.size());
+
+    // A connection dropped while paused frees what it was holding
+    sent = 0;
+    sendWhileWindowOpen();
+    CHECK(satellite._rxPaused, "paused again");
+    client->simulateRemoteClose();
+    CHECK(!satellite._rxPaused && satellite._heldPackets.empty(), "held segments released on disconnect");
+}
+
 int main(int argc, char **argv)
 {
     g_mockVerbose = argc > 1 && std::string(argv[1]) == "-v";
@@ -870,6 +936,10 @@ int main(int argc, char **argv)
     testSavedTarget();
     testConfigApi();
     testReceiveOutOfMemory();
+    testReceiveFlowControl();
+
+    currentTest = "pbuf-leaks";
+    CHECK(pbuf::live() == 0, "every received pbuf acked or freed (%d left)", pbuf::live());
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

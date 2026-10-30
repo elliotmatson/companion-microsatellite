@@ -99,6 +99,8 @@ Key state for a layout surface carries `state.controlId`, and `state.index` is t
 
 A raw rgb bitmap of W×H pixels arrives as a single ~W×H×4 byte line, which must fit in `SatelliteOptions::maxLineLength` (32KB by default - enough for 80×80). Larger lines are skipped with a warning rather than dropping the connection. For big keys, ask for `bitmapFormat = "png"` or `"webp"` (if you have a decoder), or a smaller size.
 
+Received messages wait in a queue for `loop()`, up to `SatelliteOptions::maxQueuedBytes` (64KB by default). When `loop()` falls behind, receiving pauses with TCP flow control - Companion waits - rather than updates being dropped. To keep that headroom, the queue pauses once it's within `maxLineLength` plus a TCP window (5760 bytes on the ESP32) of the limit, so with the defaults that's after about 24KB. If your bitmaps are big, set `maxLineLength` to just fit them and give `maxQueuedBytes` room for a few, so that receiving and drawing can overlap ([`examples/cyd`](examples/cyd) does this for 80×80 rgb).
+
 ## Migrating from 0.0.1
 
 0.1.0 changes some of the API. Most sketches only need the first two changes.

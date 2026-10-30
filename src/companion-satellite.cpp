@@ -36,6 +36,30 @@ static constexpr size_t kMaxTxBufferBytes = 16384;
 
 #ifdef ESP_PLATFORM
 #include <esp_heap_caps.h>
+#include <sdkconfig.h>
+#endif
+
+/** How much Companion can send that we haven't acked yet: lwIP's TCP receive window */
+#ifdef CONFIG_LWIP_TCP_WND_DEFAULT
+static constexpr size_t kTcpReceiveWindow = CONFIG_LWIP_TCP_WND_DEFAULT;
+#else
+static constexpr size_t kTcpReceiveWindow = 5760; // the ESP32's default
+#endif
+
+/** On top of a queued line's text: its parsed parameters and queue entry */
+static constexpr size_t kQueuedLineOverhead = 2048;
+
+/**
+ * Room kept free below maxQueuedBytes for what can still arrive after receiving pauses:
+ * at most the partly received line plus a TCP window of data. Only completed lines count
+ * towards the queue, as a partial one can't finish while we're paused.
+ */
+static size_t reservedForInFlight(const SatelliteOptions &options)
+{
+    return options.maxLineLength + kTcpReceiveWindow + kQueuedLineOverhead;
+}
+
+#ifdef ESP_PLATFORM
 
 /** Heap to leave free for WiFi, lwIP and the application when buffering a received line */
 static constexpr size_t kReceiveHeapHeadroomBytes = 16384;
@@ -182,9 +206,10 @@ Satellite::~Satellite()
             // Stop it calling back into this object, and close it
             _client->onConnect(nullptr);
             _client->onDisconnect(nullptr);
-            _client->onData(nullptr);
+            _client->onPacket(nullptr);
             _client->onAck(nullptr);
             _client->onError(nullptr);
+            dropHeldPackets();
             _client->close();
             // While still connecting, a DNS lookup may be in flight that AsyncTCP will
             // complete on this client later, so it has to be leaked rather than deleted
@@ -222,6 +247,11 @@ void Satellite::begin(const SatelliteOptions &options)
         _begun = true;
         _options = options;
         _rxBuffer.setMaxLineLength(options.maxLineLength);
+        if (options.dispatch == SatelliteDispatchMode::LOOP && options.maxQueuedBytes < reservedForInFlight(options))
+        {
+            ESP_LOGW(TAG, "SatelliteOptions::maxQueuedBytes (%u) is below maxLineLength + the %u byte TCP window + %u, so updates can be dropped when loop() falls behind",
+                     static_cast<unsigned>(options.maxQueuedBytes), static_cast<unsigned>(kTcpReceiveWindow), static_cast<unsigned>(kQueuedLineOverhead));
+        }
 #ifdef ESP_PLATFORM
         _rxBuffer.setAllocationCheck(canAllocateReceiveBuffer);
 #endif
@@ -512,6 +542,7 @@ void Satellite::retireClient()
     }
 
     AsyncClient *client = _client;
+    dropHeldPackets();
     _client = nullptr;
     _retiredClients.push_back({client, millis(), false, 0});
     resetRegistrations();
@@ -564,8 +595,8 @@ void Satellite::connectToCompanion()
                       { onClientConnect(c); });
     client->onDisconnect([this](void *, AsyncClient *c)
                          { onClientDisconnect(c); });
-    client->onData([this](void *, AsyncClient *c, void *data, size_t length)
-                   { onClientData(c, static_cast<const char *>(data), length); });
+    client->onPacket([this](void *, AsyncClient *c, pbuf *pb)
+                     { onClientPacket(c, pb); });
     client->onAck([this](void *, AsyncClient *c, size_t, uint32_t)
                   {
                       Lock lock(_mutex);
@@ -650,7 +681,8 @@ void Satellite::tick()
                 scheduleReconnect();
                 break;
             }
-            if (now - _lastRxMs >= _options.keepaliveTimeoutMs)
+            // While paused, the silence is our own doing (see onClientPacket)
+            if (!_rxPaused && now - _lastRxMs >= _options.keepaliveTimeoutMs)
             {
                 // Catches a half-open connection (Companion's host lost power, the access
                 // point went away...) which TCP alone may not notice for minutes.
@@ -731,6 +763,7 @@ void Satellite::onClientDisconnect(AsyncClient *client)
         }
 
         ESP_LOGW(TAG, "Disconnected from Companion");
+        dropHeldPackets();
         _client = nullptr;
         _retiredClients.push_back({client, now, true, now});
         resetRegistrations();
@@ -746,6 +779,72 @@ void Satellite::onClientDisconnect(AsyncClient *client)
     {
         drainQueue();
     }
+}
+
+/**
+ * Each received TCP segment, on the network task. The data is handled straight away, but
+ * while more is queued than loop() has caught up with, the segment isn't acknowledged:
+ * Companion's TCP window closes and it waits, rather than the queue overflowing and
+ * updates being dropped. resumeReceiving() acks the held segments once loop() catches up.
+ */
+void Satellite::onClientPacket(AsyncClient *client, pbuf *pb)
+{
+    onClientData(client, static_cast<const char *>(pb->payload), pb->len);
+
+    {
+        Lock lock(_mutex);
+        if (client == _client && (_rxPaused || _queuedBytes > receivePauseThreshold()))
+        {
+            if (!_rxPaused)
+            {
+                ESP_LOGD(TAG, "%u bytes waiting for loop(), pausing receive", static_cast<unsigned>(_queuedBytes));
+                _rxPaused = true;
+            }
+            _heldPackets.push_back(pb);
+            return;
+        }
+    }
+    // ackPacket goes through the TCP/IP task, so it is fine from here or from loop()
+    client->ackPacket(pb);
+}
+
+size_t Satellite::receivePauseThreshold() const
+{
+    size_t reserved = reservedForInFlight(_options);
+    return _options.maxQueuedBytes > reserved ? _options.maxQueuedBytes - reserved : 0;
+}
+
+/** Ack whatever was held back once loop() has drained the queue below the threshold */
+void Satellite::resumeReceiving()
+{
+    std::vector<pbuf *> held;
+    AsyncClient *client;
+    {
+        Lock lock(_mutex);
+        if (!_rxPaused || _queuedBytes > receivePauseThreshold())
+        {
+            return;
+        }
+        _rxPaused = false;
+        held.swap(_heldPackets);
+        client = _client;
+        _lastRxMs = millis(); // restart the keepalive clock, which stood still while paused
+    }
+    for (pbuf *pb : held)
+    {
+        client->ackPacket(pb);
+    }
+}
+
+/** The connection is going away: free held segments without acking them. Call with _mutex held */
+void Satellite::dropHeldPackets()
+{
+    for (pbuf *pb : _heldPackets)
+    {
+        pbuf_free(pb);
+    }
+    _heldPackets.clear();
+    _rxPaused = false;
 }
 
 void Satellite::onClientData(AsyncClient *client, const char *data, size_t length)
@@ -1190,6 +1289,8 @@ void Satellite::drainQueue()
         }
         dispatch(item);
     }
+
+    resumeReceiving();
 }
 
 void Satellite::dispatch(QueuedItem &item)

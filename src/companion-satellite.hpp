@@ -38,6 +38,7 @@
 // Only used as pointers here; companion-satellite.cpp includes the real headers.
 class AsyncWebServer;
 class AsyncClient;
+struct pbuf;
 
 /**
  * @brief Where callbacks run
@@ -80,7 +81,11 @@ struct SatelliteOptions
      */
     size_t maxLineLength = 32768;
 
-    /** In LOOP mode, the most received data to hold waiting for loop(), in bytes. Beyond this, updates are dropped */
+    /**
+     * In LOOP mode, the most received data to hold waiting for loop(), in bytes. Once the
+     * queue is within maxLineLength of this, receiving pauses (TCP flow control: Companion
+     * waits) until loop() catches up, so updates are only dropped if it's set below that.
+     */
     size_t maxQueuedBytes = 65536;
 
     /** Reconnect if nothing has been received from Companion for this long (Companion answers our PING every 2s) */
@@ -255,7 +260,11 @@ private:
     void setState(SatelliteConnectionState state);
     void onClientConnect(AsyncClient *client);
     void onClientDisconnect(AsyncClient *client);
+    void onClientPacket(AsyncClient *client, pbuf *pb);
     void onClientData(AsyncClient *client, const char *data, size_t length);
+    size_t receivePauseThreshold() const;
+    void resumeReceiving();
+    void dropHeldPackets();
     bool handleLine(AsyncClient *client, std::string &&line);
     void handleBegin(const Message &message);
     void handleCaps(std::unique_ptr<Message> message);
@@ -355,6 +364,8 @@ private:
 
     std::deque<QueuedItem> _queue;
     size_t _queuedBytes = 0;
+    bool _rxPaused = false;                /**< Holding acks back so Companion stops sending until loop() catches up */
+    std::vector<pbuf *> _heldPackets;   /**< Received while paused, acked by resumeReceiving() */
     uint32_t _lastLoopMs = 0;
     bool _loopWarningLogged = false;
     uint32_t _droppedUpdates = 0;

@@ -1,6 +1,7 @@
 // A scripted stand-in for ESP32Async's AsyncClient, mimicking the behaviour the library
 // relies on: close() calls onDisconnect synchronously when there is a connection,
-// add() only accepts as much as space() allows, and callbacks carry the client pointer.
+// add() only accepts as much as space() allows, callbacks carry the client pointer,
+// and received data arrives as TCP-segment-sized pbufs that must be acked or freed.
 #pragma once
 
 #include <Arduino.h>
@@ -9,12 +10,34 @@
 #include <string>
 #include <vector>
 
+// Just enough of lwIP's pbuf for received data: the library must hand each one back
+// through ackPacket() or pbuf_free(), and livePbufs() catches any it leaks.
+struct pbuf
+{
+    pbuf *next = nullptr;
+    void *payload = nullptr;
+    uint16_t len = 0;
+    std::string storage;
+    static int &live()
+    {
+        static int count = 0;
+        return count;
+    }
+};
+inline uint8_t pbuf_free(pbuf *p)
+{
+    pbuf::live()--;
+    delete p;
+    return 1;
+}
+
 class AsyncClient;
 
 typedef std::function<void(void *, AsyncClient *)> AcConnectHandler;
 typedef std::function<void(void *, AsyncClient *, size_t len, uint32_t time)> AcAckHandler;
 typedef std::function<void(void *, AsyncClient *, int8_t error)> AcErrorHandler;
 typedef std::function<void(void *, AsyncClient *, void *data, size_t len)> AcDataHandler;
+typedef std::function<void(void *, AsyncClient *, struct pbuf *pb)> AcPacketHandler;
 
 class AsyncClient
 {
@@ -31,6 +54,14 @@ public:
     void onAck(AcAckHandler cb, void * = nullptr) { _onAck = cb; }
     void onError(AcErrorHandler cb, void * = nullptr) { _onError = cb; }
     void onData(AcDataHandler cb, void * = nullptr) { _onData = cb; }
+    void onPacket(AcPacketHandler cb, void * = nullptr) { _onPacket = cb; }
+    void ackPacket(pbuf *pb)
+    {
+        if (!pb)
+            return;
+        ackedBytes += pb->len;
+        pbuf_free(pb);
+    }
 
     bool connect(const char *host, uint16_t port)
     {
@@ -92,12 +123,30 @@ public:
     }
     void simulateData(const std::string &data)
     {
-        // Like AsyncTCP's _recv, touch the object again after the callback returns, so
-        // a client deleted from inside its own onData shows up under AddressSanitizer.
-        if (_onData)
-            _onData(nullptr, this, const_cast<char *>(data.data()), data.size());
-        bytesReceived += data.size();
+        // Like AsyncTCP's _recv: one callback per TCP segment, touching the object again
+        // after each, so a client deleted from inside its own callback shows up under
+        // AddressSanitizer. With onPacket, the library owns (and must ack or free) each pbuf.
+        for (size_t offset = 0; offset < data.size(); offset += kSegment)
+        {
+            size_t n = std::min(kSegment, data.size() - offset);
+            if (_onPacket)
+            {
+                pbuf *pb = new pbuf();
+                pbuf::live()++;
+                pb->storage.assign(data, offset, n);
+                pb->payload = pb->storage.data();
+                pb->len = static_cast<uint16_t>(n);
+                _onPacket(nullptr, this, pb);
+            }
+            else if (_onData)
+            {
+                _onData(nullptr, this, const_cast<char *>(data.data() + offset), n);
+            }
+            bytesReceived += n;
+        }
     }
+    /** @brief Received bytes the library hasn't acked yet - what keeps the sender's TCP window shut */
+    size_t unackedBytes() const { return bytesReceived - ackedBytes; }
     void simulateRemoteClose()
     {
         _hasPcb = false;
@@ -117,6 +166,8 @@ public:
     std::string written;
     size_t spaceAvailable = 5744;
     size_t bytesReceived = 0;
+    size_t ackedBytes = 0;
+    static constexpr size_t kSegment = 1436;
     int closeCount = 0;
 
 private:
@@ -124,6 +175,7 @@ private:
     AcAckHandler _onAck;
     AcErrorHandler _onError;
     AcDataHandler _onData;
+    AcPacketHandler _onPacket;
     std::string _pending;
     bool _hasPcb = false;
     bool _connected = false;
