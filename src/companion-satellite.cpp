@@ -7,6 +7,7 @@
 #include "companion-satellite.hpp"
 
 #include <algorithm>
+#include <ArduinoJson.h>
 #include <AsyncTCP.h>
 #include <MD5Builder.h>
 #include <new>
@@ -298,6 +299,69 @@ void Satellite::setTarget(const String &hostname, uint16_t port)
     {
         connectToCompanion();
     }
+}
+
+static bool parsePort(JsonVariantConst value, uint16_t &port)
+{
+    if (value.is<int>())
+    {
+        int number = value.as<int>();
+        if (number > 0 && number <= 65535)
+        {
+            port = static_cast<uint16_t>(number);
+            return true;
+        }
+    }
+    return false;
+}
+
+Satellite::ConfigApiResponse Satellite::handleConfigPost(const String &path, String body)
+{
+    body.trim();
+    JsonDocument doc;
+    bool isJson = deserializeJson(doc, body) == DeserializationError::Ok && doc.is<JsonObject>();
+
+    if (path == "/api/host")
+    {
+        String host = isJson ? doc["host"].as<String>() : body;
+        if (host.length() == 0 || host == "null")
+        {
+            return {400, "Missing host"};
+        }
+        setTargetHostname(host);
+    }
+    else if (path == "/api/port")
+    {
+        uint16_t port = 0;
+        if (isJson ? !parsePort(doc["port"], port) : !(body.toInt() > 0 && body.toInt() <= 65535))
+        {
+            return {400, "Invalid port"};
+        }
+        if (!isJson)
+        {
+            port = static_cast<uint16_t>(body.toInt());
+        }
+        setTargetPort(port);
+    }
+    else if (path == "/api/config")
+    {
+        if (!isJson)
+        {
+            return {400, "Invalid JSON"};
+        }
+        String host = doc["host"].is<const char *>() ? doc["host"].as<String>() : getTargetHostname();
+        uint16_t port = getTargetPort();
+        if (!doc["port"].isNull() && !parsePort(doc["port"], port))
+        {
+            return {400, "Invalid port"};
+        }
+        setTarget(host, port);
+    }
+    else
+    {
+        return {404, "Not Found"};
+    }
+    return {200, "OK"};
 }
 
 void Satellite::saveTarget()

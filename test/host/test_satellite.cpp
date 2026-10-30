@@ -781,6 +781,37 @@ static void testSavedTarget()
     }
 }
 
+// The config API's POST handling (companion-satellite-web.cpp routes /api/host, /api/port and
+// /api/config POSTs here). On the device, POSTs used to fall through to the web server's
+// not-found handler and answer 404 even though the target had been changed.
+static void testConfigApi()
+{
+    currentTest = "config-api";
+    Satellite satellite("test-config-api");
+    satellite.begin(testOptions());
+
+    Satellite::ConfigApiResponse response = satellite.handleConfigPost("/api/config", "{\"host\":\"companion.lan\",\"port\":16622}");
+    CHECK(response.status == 200, "config POST answers 200 (got %d)", response.status);
+    CHECK(satellite.getTargetHostname() == "companion.lan" && satellite.getTargetPort() == 16622, "config POST sets the target");
+    CHECK(currentClient(satellite) && currentClient(satellite)->host_ == "companion.lan", "config POST connects");
+
+    response = satellite.handleConfigPost("/api/config", "{\"port\":1234}");
+    CHECK(response.status == 200 && satellite.getTargetHostname() == "companion.lan" && satellite.getTargetPort() == 1234,
+          "config POST without host keeps the host");
+
+    response = satellite.handleConfigPost("/api/host", "  other-host\n");
+    CHECK(response.status == 200 && satellite.getTargetHostname() == "other-host", "plain-text host POST");
+    response = satellite.handleConfigPost("/api/port", "{\"port\":4321}");
+    CHECK(response.status == 200 && satellite.getTargetPort() == 4321, "JSON port POST");
+
+    CHECK(satellite.handleConfigPost("/api/config", "not json").status == 400, "invalid JSON rejected");
+    CHECK(satellite.handleConfigPost("/api/config", "{\"port\":0}").status == 400, "port 0 rejected");
+    CHECK(satellite.handleConfigPost("/api/port", "99999").status == 400, "out of range port rejected");
+    CHECK(satellite.handleConfigPost("/api/host", "").status == 400, "empty host rejected");
+    CHECK(satellite.handleConfigPost("/api/other", "{}").status == 404, "unknown path is 404");
+    CHECK(satellite.getTargetHostname() == "other-host" && satellite.getTargetPort() == 4321, "rejected POSTs leave the target alone");
+}
+
 int main(int argc, char **argv)
 {
     g_mockVerbose = argc > 1 && std::string(argv[1]) == "-v";
@@ -799,6 +830,7 @@ int main(int argc, char **argv)
     testImmediateDispatchAndRemoval();
     testQueueBound();
     testSavedTarget();
+    testConfigApi();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

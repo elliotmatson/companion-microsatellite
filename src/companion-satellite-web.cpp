@@ -28,20 +28,6 @@ static String configJson(const String &host, uint16_t port)
     return json;
 }
 
-static bool parsePort(JsonVariantConst value, uint16_t &port)
-{
-    if (value.is<int>())
-    {
-        int number = value.as<int>();
-        if (number > 0 && number <= 65535)
-        {
-            port = static_cast<uint16_t>(number);
-            return true;
-        }
-    }
-    return false;
-}
-
 void Satellite::beginWebConfig()
 {
     _server = new AsyncWebServer(_apiPort);
@@ -53,95 +39,39 @@ void Satellite::beginWebConfig()
     _server->on("/api/config", HTTP_GET, [this](AsyncWebServerRequest *request)
                 { request->send(200, "application/json", configJson(getTargetHostname(), getTargetPort())); });
 
-    _server->onRequestBody([this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
-                           {
-        if (request->method() != HTTP_POST)
-        {
-            return;
-        }
+    // POST bodies arrive in chunks: collect them into a null-terminated buffer on the request,
+    // then answer once the whole body is in. calloc/free because the request frees
+    // _tempObject itself if the client goes away mid-body.
+    auto collectBody = [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+    {
         if (total > kMaxBodyBytes)
         {
-            if (index == 0)
-            {
-                request->send(413, "text/plain", "Request too large");
-            }
             return;
         }
-
-        if (index == 0)
+        if (index == 0 && !request->_tempObject)
         {
-            String *body = new String();
-            body->reserve(total);
-            request->_tempObject = body;
+            request->_tempObject = calloc(total + 1, 1);
         }
-
-        String *body = static_cast<String *>(request->_tempObject);
-        if (!body)
+        if (request->_tempObject && index + len <= total)
         {
+            memcpy(static_cast<uint8_t *>(request->_tempObject) + index, data, len);
+        }
+    };
+    auto applyBody = [this](AsyncWebServerRequest *request)
+    {
+        if (request->contentLength() > kMaxBodyBytes)
+        {
+            request->send(413, "text/plain", "Request too large");
             return;
         }
-        body->concat(reinterpret_cast<const char *>(data), len);
-        if (index + len != total)
-        {
-            return;
-        }
-
-        String payload = *body;
-        delete body;
-        request->_tempObject = nullptr;
-        payload.trim();
-
-        JsonDocument doc;
-        bool isJson = deserializeJson(doc, payload) == DeserializationError::Ok && doc.is<JsonObject>();
-        String url = request->url();
-
-        if (url == "/api/host")
-        {
-            String host = isJson ? doc["host"].as<String>() : payload;
-            if (host.length() == 0 || host == "null")
-            {
-                request->send(400, "text/plain", "Missing host");
-                return;
-            }
-            setTargetHostname(host);
-        }
-        else if (url == "/api/port")
-        {
-            uint16_t port = 0;
-            bool valid = isJson ? parsePort(doc["port"], port) : (payload.toInt() > 0 && payload.toInt() <= 65535);
-            if (!isJson && valid)
-            {
-                port = static_cast<uint16_t>(payload.toInt());
-            }
-            if (!valid)
-            {
-                request->send(400, "text/plain", "Invalid port");
-                return;
-            }
-            setTargetPort(port);
-        }
-        else if (url == "/api/config")
-        {
-            if (!isJson)
-            {
-                request->send(400, "text/plain", "Invalid JSON");
-                return;
-            }
-            String host = doc["host"].is<const char *>() ? doc["host"].as<String>() : getTargetHostname();
-            uint16_t port = getTargetPort();
-            if (!doc["port"].isNull() && !parsePort(doc["port"], port))
-            {
-                request->send(400, "text/plain", "Invalid port");
-                return;
-            }
-            setTarget(host, port);
-        }
-        else
-        {
-            request->send(404, "text/plain", "Not Found");
-            return;
-        }
-        request->send(200, "text/plain", "OK"); });
+        String body = request->_tempObject ? String(static_cast<const char *>(request->_tempObject)) : String();
+        ConfigApiResponse response = handleConfigPost(request->url(), body);
+        request->send(response.status, "text/plain", response.message);
+    };
+    for (const char *path : {"/api/host", "/api/port", "/api/config"})
+    {
+        _server->on(path, HTTP_POST, applyBody, nullptr, collectBody);
+    }
 
     _server->begin();
 }

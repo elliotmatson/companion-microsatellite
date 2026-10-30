@@ -294,6 +294,21 @@ private:
     std::vector<int> rotationDirections(int steps) const;
 
     // --- config API and mDNS (companion-satellite-web.cpp) ---
+
+    /** @brief HTTP status and plain-text body to answer a config API write with */
+    struct ConfigApiResponse
+    {
+        int status;
+        const char *message;
+    };
+
+    /**
+     * @brief Apply a POST to /api/host, /api/port or /api/config, and say how to answer it
+     *
+     * Kept apart from the web server routing (companion-satellite-web.cpp) so the host tests can drive it.
+     */
+    ConfigApiResponse handleConfigPost(const String &path, String body);
+
     void beginWebConfig();
     void endWebConfig();
     void beginMdns();
