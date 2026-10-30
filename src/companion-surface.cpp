@@ -124,9 +124,11 @@ std::string SatelliteSurface::buildAddDeviceCommand() const
             object["name"] = variable.name;
             object["description"] = variable.description;
         }
-        std::string json;
+        // String rather than std::string, like the other JSON this library writes, so
+        // ArduinoJson's serializer is only compiled in once
+        String json;
         serializeJson(doc, json);
-        command.str("VARIABLES", satellite_protocol::base64Encode(json));
+        command.str("VARIABLES", satellite_protocol::base64Encode(std::string_view(json.c_str(), json.length())));
     }
 
     if (_config.configFieldsJson && _config.configFieldsJson->length() > 0)
