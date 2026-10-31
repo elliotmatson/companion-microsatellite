@@ -6,8 +6,8 @@ Turns a "Cheap Yellow Display" into a 12-key Companion surface: a 4×3 grid of b
 
 Each [release](https://github.com/elliotmatson/companion-microsatellite/releases) has this example built for the ESP32-2432S028R, so you don't need the Arduino toolchain:
 
-- `companion-cyd-<version>.bin` - the whole image (bootloader, partition table and app), flashed at `0x0`.
-- `companion-cyd-<version>-app.bin` - just the app, to update a board that already runs it, flashed at `0x10000`.
+- `companion-cyd-<version>.bin` - the whole image (bootloader, partition table and app), flashed at `0x0`. It fills the whole flash, so it also clears the saved WiFi network and touch calibration.
+- `companion-cyd-<version>-app.bin` - just the app, to update a board that already runs it and keep its WiFi network and touch calibration, flashed at `0x10000`.
 
 **From a browser** (Chrome or Edge on a computer, nothing to install):
 
@@ -76,7 +76,7 @@ The states don't depend on red, as on some boards the red part of the LED isn't 
 
 ## Touch calibration
 
-Resistive panels vary. If taps land on the wrong key, calibrate: press the BOOT button, then tap the cross near the top-left corner and the one near the bottom-right. The result is saved in flash and survives reflashing; the `TOUCH_RAW_*` defines are only defaults.
+Resistive panels vary. If taps land on the wrong key, calibrate: press the BOOT button, then tap the cross near the top-left corner and the one near the bottom-right. The result is saved in flash, and kept when you upload the sketch again or flash the app-only firmware (but not the whole image). The `TOUCH_RAW_*` defines are only defaults.
 
 ## Performance
 
