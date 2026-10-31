@@ -96,8 +96,9 @@ void setup()
   strip.show(); // all off
 
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  // WiFi power saving holds incoming data for up to a few hundred milliseconds,
-  // which delays color changes from Companion by as much.
+  // Turn off WiFi power saving, so Companion's updates arrive straight away. With it on,
+  // the radio only wakes every few beacons to collect them, adding up to a few hundred
+  // ms, and on some access points they stall until the connection times out.
   WiFi.setSleep(false);
   // Many small ESP32-C3 boards have a poorly matched antenna and connect more
   // reliably at reduced transmit power.

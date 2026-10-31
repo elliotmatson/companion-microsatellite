@@ -591,6 +591,10 @@ void setupWiFi()
     ESP.restart();
   }
   Serial.printf("Connected to WiFi, IP %s\n", WiFi.localIP().toString().c_str());
+  // Turn off WiFi power saving, so Companion's updates arrive straight away. With it on,
+  // the radio only wakes every few beacons to collect them, adding up to a few hundred
+  // ms, and on some access points they stall until the connection times out.
+  WiFi.setSleep(false);
 }
 
 // Point the satellite at what was entered on the setup page, if anything ("host" or "host:port").

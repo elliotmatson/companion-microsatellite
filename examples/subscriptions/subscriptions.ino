@@ -52,6 +52,10 @@ void setup()
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // Turn off WiFi power saving, so Companion's updates arrive straight away. With it on,
+  // the radio only wakes every few beacons to collect them, adding up to a few hundred
+  // ms, and on some access points they stall until the connection times out.
+  WiFi.setSleep(false);
   while (WiFi.status() != WL_CONNECTED)
   {
     delay(1000);

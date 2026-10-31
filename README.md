@@ -104,6 +104,10 @@ To keep that headroom, the queue pauses once it's within `maxLineLength` plus a 
 
 If your bitmaps are big, set `maxLineLength` to just fit them and give `maxQueuedBytes` room for a few, so that receiving and drawing can overlap ([`examples/cyd`](examples/cyd) does this for 80×80 rgb).
 
+### WiFi power saving
+
+Call `WiFi.setSleep(false)` in your sketch, as the examples do. With power saving on (the ESP32's default), the radio only wakes every few beacons to collect what the access point held for it, so Companion's updates arrive up to a few hundred milliseconds late, and on some access points they stall until the connection times out and reconnects. Leave it on only for a battery-powered device that can live with that.
+
 ### Leaving out the REST API and mDNS
 
 `SatelliteOptions::webConfig` and `::mdns` turn the REST config API and the mDNS advertisement off at runtime, but their code is still in the firmware. If you don't need them, two build flags leave them out:

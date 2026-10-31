@@ -32,4 +32,4 @@ The surface shows up in Companion as "3x3 Keypad". Set a background color on a b
 - **Colors only:** the surface asks for key colors but not text or bitmaps, so Companion sends very little.
 - **Buttons:** `loop()` polls them, ignores contact bounce, and sends a press or release only when one changes.
 - **Dark while disconnected:** the LEDs turn off when the connection to Companion drops, rather than showing stale colors. Companion sends every key's color again after reconnecting.
-- **WiFi:** power saving is turned off, as it delays incoming updates by up to a few hundred milliseconds. Transmit power is lowered to 13dBm, which many small C3 boards with poorly matched antennas need to connect reliably.
+- **WiFi:** power saving is turned off, so color changes from Companion arrive straight away. Transmit power is lowered to 13dBm, which many small C3 boards with poorly matched antennas need to connect reliably.
