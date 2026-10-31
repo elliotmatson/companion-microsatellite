@@ -106,7 +106,8 @@ If your bitmaps are big, set `maxLineLength` to just fit them and give `maxQueue
 
 ### WiFi power saving
 
-Call `WiFi.setSleep(false)` in your sketch, as the examples do. With power saving on (the ESP32's default), the radio only wakes every few beacons to collect what the access point held for it, so Companion's updates arrive up to a few hundred milliseconds late, and on some access points they stall until the connection times out and reconnects. Leave it on only for a battery-powered device that can live with that.
+Call `WiFi.setSleep(false)` in your sketch, as the examples do. With power saving on (the ESP32's default), the radio only wakes every few beacons to collect what the access point held for it, so Companion's updates arrive up to a few hundred milliseconds late, and on some access points they stall until the connection times out and reconnects.
+Leave it on only for a battery-powered device that can live with that.
 
 ### Leaving out the REST API and mDNS
 
