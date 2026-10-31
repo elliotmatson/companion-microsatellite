@@ -17,14 +17,17 @@ Requires Companion Satellite API version 1.10.0 or later (Companion v4.3+). LED 
 
 ## Installation
 
-**PlatformIO:** add this repository to your project's `platformio.ini`:
+**PlatformIO:** add it to your project's `platformio.ini` from the PlatformIO registry:
 
 ```ini
 lib_deps =
-    https://github.com/elliotmatson/companion-microsatellite.git
+    elliotmatson/companion-microsatellite@^1.0.1
+    ESP32Async/ESPAsyncWebServer
+    ESP32Async/AsyncTCP
 ```
 
-The library declares its own dependencies (ESPAsyncWebServer, AsyncTCP, ArduinoJson), so PlatformIO will pull those in automatically.
+The library declares its dependencies (ESPAsyncWebServer, AsyncTCP, ArduinoJson), so PlatformIO installs them, but list the two async libraries yourself too, as above. Otherwise PlatformIO doesn't give them the Arduino core's WiFi library, and the build fails with `WiFi.h: No such file or directory`.
+To use an unreleased version instead, replace the first line with the repository's URL: `https://github.com/elliotmatson/companion-microsatellite.git`.
 
 **Arduino IDE:** install "Companion microSatellite" from the Library Manager, and accept its dependencies: ESP Async WebServer and Async TCP (both by ESP32Async), and ArduinoJson. To use an unreleased version instead, clone or download this repository into your `Arduino/libraries/` folder (or use _Sketch > Include Library > Add .ZIP Library_) and install those three yourself.
 
