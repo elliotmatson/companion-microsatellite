@@ -26,7 +26,7 @@ lib_deps =
 
 The library declares its own dependencies (ESPAsyncWebServer, AsyncTCP, ArduinoJson), so PlatformIO will pull those in automatically.
 
-**Arduino IDE:** clone or download this repository into your `Arduino/libraries/` folder (or use _Sketch > Include Library > Add .ZIP Library_), then install ESPAsyncWebServer, AsyncTCP, and ArduinoJson yourself via the Library Manager, since Arduino IDE doesn't resolve a library's own dependencies automatically the way PlatformIO does.
+**Arduino IDE:** install "Companion microSatellite" from the Library Manager, and accept its dependencies: ESP Async WebServer and Async TCP (both by ESP32Async), and ArduinoJson. To use an unreleased version instead, clone or download this repository into your `Arduino/libraries/` folder (or use _Sketch > Include Library > Add .ZIP Library_) and install those three yourself.
 
 ## Usage
 
@@ -103,6 +103,11 @@ Received messages wait in a queue for `loop()`, up to `SatelliteOptions::maxQueu
 To keep that headroom, the queue pauses once it's within `maxLineLength` plus a TCP window (5760 bytes on the ESP32) of the limit, so with the defaults that's after about 24KB.
 
 If your bitmaps are big, set `maxLineLength` to just fit them and give `maxQueuedBytes` room for a few, so that receiving and drawing can overlap ([`examples/cyd`](examples/cyd) does this for 80×80 rgb).
+
+### WiFi power saving
+
+Call `WiFi.setSleep(false)` in your sketch, as the examples do. With power saving on (the ESP32's default), the radio only wakes every few beacons to collect what the access point held for it, so Companion's updates arrive up to a few hundred milliseconds late, and on some access points they stall until the connection times out and reconnects.
+Leave it on only for a battery-powered device that can live with that.
 
 ### Leaving out the REST API and mDNS
 
@@ -198,6 +203,7 @@ Callbacks declared with the old parameter types still compile: a key state lambd
 Arduino IDE sketches (`.ino`, no `platformio.ini`) - open directly in the Arduino IDE, or compile with `arduino-cli`:
 
 - [`examples/basic`](examples/basic) - WiFi, a NeoPixel driven by key color, and a physical button reporting presses back to Companion.
+- [`examples/keypad-3x3`](examples/keypad-3x3) - nine buttons with DotStar LEDs showing each key's color, on an ESP32-C3: WiFi set up from a phone, status shown on the LEDs, debounced buttons, and a colors-only surface.
 - [`examples/encoder-led-ring`](examples/encoder-led-ring) - a layout manifest with a rotary encoder surrounded by a 24 LED NeoPixel ring (driven by Companion's LED ring styles) and a color-only button, sending multi-step rotations.
 - [`examples/subscriptions`](examples/subscriptions) - follows and presses a single button by absolute location using `SatelliteSubscription`, instead of registering a full surface. **Button subscriptions must be enabled in Companion's settings** for this to work.
 - [`examples/configuration-and-variables`](examples/configuration-and-variables) - a custom settings form (`CONFIG_FIELDS`/`DEVICE-CONFIG`, Companion -> device) alongside an input variable and an output variable (`setVariable()`/`setOnVariableSet()`, both directions).

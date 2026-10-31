@@ -2,7 +2,7 @@
  * @file companion-satellite.hpp
  * @brief Companion Satellite API library for ESP32 microcontrollers
  * @author Elliot Matson
- * @version 1.0.0
+ * @version 1.0.1
  *
  * Connects ESP32 based devices to Bitfocus Companion via the Companion Satellite API,
  * as virtual surfaces (SatelliteSurface) and/or button subscriptions

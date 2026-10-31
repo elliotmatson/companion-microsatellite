@@ -1,4 +1,4 @@
-// Exhaustive feature-coverage example for the CompanionSatellite library.
+// Exhaustive feature-coverage example for the Companion microSatellite library.
 //
 // Registers every callback the library offers, then runs through every
 // public method on Satellite, SatelliteSurface and SatelliteSubscription
@@ -160,6 +160,10 @@ void setup()
     delay(1000);
 
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    // Turn off WiFi power saving, so Companion's updates arrive straight away. With it on,
+    // the radio only wakes every few beacons to collect them, adding up to a few hundred
+    // ms, and on some access points they stall until the connection times out.
+    WiFi.setSleep(false);
     while (WiFi.status() != WL_CONNECTED)
     {
         delay(1000);
